@@ -10,13 +10,13 @@ from stable_baselines3 import A2C
 # lap_complete_percent requiers that car must touch a certain amount of times for a lap to be 
 # considered complete. 
 env = gym.make(
-    "CarRacing-v2", 
+    "CarRacing-v3", 
     render_mode ="rgb_array", 
     lap_complete_percent = 0.95, 
     domain_randomize = False, 
     continuous = False)
 
-model = A2C("MlpPolicy", env, verbose = 1)
+model = A2C("CnnPolicy", env, verbose = 1)
 model.learn(total_timesteps = 50000)
 model.save("a2c_cartpole")
 
