@@ -5,7 +5,6 @@ import gymnasium as gym
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3.common.vec_env import VecTransposeImage # chat
 
 # Environment shall be Car Racing.
 
@@ -18,7 +17,7 @@ env = gym.make(
     domain_randomize = False, 
     continuous = False)
 env = DummyVecEnv([lambda: env])
-env = VecTransposeImage(env) # chatgpt
+
 model = PPO("CnnPolicy", env, verbose=1, tensorboard_log="./ppo_cartpole_tensorboard/")
 model.learn(total_timesteps=100000) 
 model.save("ppo_carracing")
