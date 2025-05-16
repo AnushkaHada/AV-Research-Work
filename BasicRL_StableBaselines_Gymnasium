@@ -4,7 +4,7 @@
 import gymnasium as gym
 
 from stable_baselines3 import PPO
-
+from stable_baselines3.common.vec_env import DummyVecEnv
 # Environment shall be Car Racing.
 
 # lap_complete_percent requiers that car must touch a certain amount of times for a lap to be 
