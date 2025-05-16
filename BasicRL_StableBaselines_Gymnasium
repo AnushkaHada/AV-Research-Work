@@ -1,3 +1,31 @@
-#Date: May 15, 2025
-#Purpose: Run Stable Basline on a Gymnasium Environment. 
+# Date: May 15, 2025
+# Purpose: Run Stable Basline on a Gymnasium Environment. 
+
+import gymnasium as gym
+
+from stable_baselines3 import A2C
+
+# Environment shall be Car Racing.
+
+# lap_complete_percent requiers that car must touch a certain amount of times for a lap to be 
+# considered complete. 
+env = gym.make(
+    "CarRacing-v3", 
+    render_mode ="rgb_array", 
+    lap_complete_percent = 0.95, 
+    domain_randomize = False, 
+    continuous = False)
+
+model = A2C("MlpPolicy", env, verbose = 1)
+model.learn(total_timesteps = 25000)
+model.save("a2c_cartpole")
+
+del model 
+
+model = A2C.load("a2c_cartpole")
+obs = env.reset()
+while True:
+    action, _states = model.predict(obs)
+    obs, rewards, dones, info = env.step(action)
+    env.render("human")
 
