@@ -10,7 +10,7 @@ from stable_baselines3 import A2C
 # lap_complete_percent requiers that car must touch a certain amount of times for a lap to be 
 # considered complete. 
 env = gym.make(
-    "CarRacing-v3", 
+    "CarRacing-v2", 
     render_mode ="rgb_array", 
     lap_complete_percent = 0.95, 
     domain_randomize = False, 
