@@ -5,7 +5,7 @@ import gymnasium as gym
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
-
+from stable_baselines3.common.monitor import Monitor
 # Environment shall be Car Racing.
 
 # lap_complete_percent requiers that car must touch a certain amount of times for a lap to be 
@@ -16,6 +16,7 @@ env = gym.make(
     lap_complete_percent = 0.95, 
     domain_randomize = False, 
     continuous = False)
+env = Monitor(env)
 env = DummyVecEnv([lambda: env])
 
 model = PPO("CnnPolicy", env, verbose=1, tensorboard_log="./ppo_cartpole_tensorboard/")
