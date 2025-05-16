@@ -3,7 +3,7 @@
 
 import gymnasium as gym
 
-from stable_baselines3 import A2C
+from stable_baselines3 import PPO
 
 # Environment shall be Car Racing.
 
