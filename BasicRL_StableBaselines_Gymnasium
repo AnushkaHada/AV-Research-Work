@@ -16,10 +16,10 @@ env = gym.make(
     domain_randomize = False, 
     continuous = False)
 env = DummyVecEnv([lambda: env])
-
+env = VecTransposeImage(env) # chatgpt
 model = PPO("CnnPolicy", env, verbose=1, tensorboard_log="./ppo_cartpole_tensorboard/")
 model.learn(total_timesteps=100000) 
-model.save("ppo_cartpole")
+model.save("ppo_carracing")
 
 
 obs = env.reset()
