@@ -41,7 +41,7 @@ INIT_HP = {
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     "CHANNELS_LAST": True,  # Use with RGB states
     "TARGET_SCORE": 200.0,  # Target score that will beat the environment
-    "MAX_STEPS": 150000,  # Maximum number of steps an agent takes in an environment
+    "MAX_STEPS": 5000,  # Maximum number of steps an agent takes in an environment
     "EVO_STEPS": 10000,  # Evolution frequency
     "EVAL_STEPS": None,  # Number of evaluation steps per episode
     "EVAL_LOOP": 3,  # Number of evaluation episodes
