@@ -46,7 +46,7 @@ class ActorCritic(nn.Module):
 
     def act(self, obs):
         with torch.no_grad():
-            obs = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            obs = torch.tensor(obs, dtype=torch.float32, device=device).permute(2, 0, 1).unsqueeze(0) / 255.0
             mean, std, value = self.forward(obs)
             dist = torch.distributions.Normal(mean, std)
             action = dist.sample()
