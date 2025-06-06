@@ -17,12 +17,15 @@ class ActorCritic(nn.Module):
             nn.Linear(np.prod(obs_shape), 256),
             nn.ReLU(),
         )
-        self.actor = nn.Sequential(
+        self.actor_mean = nn.Sequential(
             nn.Linear(256, 256),
             nn.ReLU(),
             nn.Linear(256, action_dim),
-            nn.Tanh()  # because CarRacing has continuous action [-1,1]
+            nn.Tanh()  # action in [-1,1]
         )
+        # Instead of outputting std as network output, define log_std as a learnable parameter:
+        self.log_std = nn.Parameter(torch.zeros(action_dim))
+
         self.critic = nn.Sequential(
             nn.Linear(256, 256),
             nn.ReLU(),
@@ -31,14 +34,22 @@ class ActorCritic(nn.Module):
 
     def forward(self, obs):
         base = self.shared(obs)
-        return self.actor(base), self.critic(base)
+        mean = self.actor_mean(base)
+        # Expand log_std to match batch size:
+        std = self.log_std.exp().expand_as(mean)
+        return mean, std, self.critic(base)
 
     def act(self, obs):
         with torch.no_grad():
             obs = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
-            action_logits, value = self.forward(obs)
-            action = action_logits.squeeze().numpy()
-            return action, value.item()
+            mean, std, value = self.forward(obs)
+            dist = torch.distributions.Normal(mean, std)
+            action = dist.sample()
+            action = torch.clamp(action, -1, 1)
+            log_prob = dist.log_prob(action).sum(dim=-1)
+            return action.squeeze().numpy(), value.item(), log_prob.item()
+
+
 class PPOAgent:
     def __init__(self, env, policy, optimizer, gamma=0.99, lam=0.95, eps_clip=0.2):
         self.env = env
@@ -50,8 +61,8 @@ class PPOAgent:
         self.training_logs = []
 
     def get_action(self, obs):
-        action, value = self.policy.act(obs)
-        return action, value
+        action, value, log_prob = self.policy.act(obs)
+        return action, value, log_prob
 
     def compute_returns(self, rewards, values, dones):
         # GAE or discounted returns
@@ -80,8 +91,9 @@ for episode in range(n_episodes):
     done = False
     rewards, values, dones, observations, actions = [], [], [], [], []
 
+    old_log_probs = []
     while not done:
-        action, value = agent.get_action(obs)
+        action, value, log_prob = agent.get_action(obs)
         next_obs, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
 
@@ -90,6 +102,7 @@ for episode in range(n_episodes):
         rewards.append(reward)
         values.append(value)
         dones.append(done)
+        old_log_probs.append(log_prob)
 
         obs = next_obs
 
@@ -100,24 +113,19 @@ for episode in range(n_episodes):
     action_tensor = torch.tensor(np.array(actions), dtype=torch.float32)
     return_tensor = torch.tensor(np.array(returns), dtype=torch.float32)
     value_tensor = torch.tensor(np.array(values), dtype=torch.float32)
+    old_log_probs_tensor = torch.tensor(old_log_probs, dtype=torch.float32)
 
     # Compute advantage
     advantage = return_tensor - value_tensor
 
     # Recompute actions and values for the update (important for PPO!)
-    action_pred, value_pred = policy(obs_tensor)
+    mean_pred, std_pred, value_pred = policy(obs_tensor)
     value_pred = value_pred.squeeze()
 
-    # Assume Gaussian policy for continuous actions
-    dist = torch.distributions.Normal(action_pred, 0.1)  # std could be learned too
-    log_probs = dist.log_prob(action_tensor).sum(axis=1)
+    dist = torch.distributions.Normal(mean_pred, std_pred)
+    log_probs = dist.log_prob(action_tensor).sum(dim=1)
 
-    # Compute new log_probs and old_log_probs
-    with torch.no_grad():
-        old_log_probs = log_probs.clone()
-
-    # PPO ratio
-    ratio = torch.exp(log_probs - old_log_probs)
+    ratio = torch.exp(log_probs - old_log_probs_tensor) # PPO ratio
 
     # PPO clipped surrogate objective
     clip_adv = torch.clamp(ratio, 1 - agent.eps_clip, 1 + agent.eps_clip) * advantage
