@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
 import numpy as np
 import gymnasium as gym
 from torch.utils.tensorboard import SummaryWriter
@@ -38,13 +40,14 @@ class ActorCritic(nn.Module):
 
     def act(self, obs):
         with torch.no_grad():
-            obs = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+            obs = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
             mean, std, value = self.forward(obs)
             dist = torch.distributions.Normal(mean, std)
             action = dist.sample()
             action = torch.clamp(action, -1, 1)
             log_prob = dist.log_prob(action).sum(dim=-1)
-            return action.squeeze().numpy(), value.item(), log_prob.item()
+            return action.squeeze().cpu().numpy(), value.item(), log_prob.item()
+
 
 class PPOAgent:
     def __init__(self, env, policy, optimizer, gamma=0.99, lam=0.95, eps_clip=0.2):
@@ -67,11 +70,11 @@ class PPOAgent:
         return returns
 
     def update(self, batch, epochs=4, batch_size=64):
-        obs_tensor = torch.tensor(np.array(batch['obs']), dtype=torch.float32)
-        action_tensor = torch.tensor(np.array(batch['actions']), dtype=torch.float32)
-        return_tensor = torch.tensor(np.array(batch['returns']), dtype=torch.float32)
-        old_log_probs_tensor = torch.tensor(batch['log_probs'], dtype=torch.float32)
-        value_tensor = torch.tensor(batch['values'], dtype=torch.float32)
+        obs_tensor = torch.tensor(np.array(batch['obs']), dtype=torch.float32, device=device)
+        action_tensor = torch.tensor(np.array(batch['actions']), dtype=torch.float32, device=device)
+        return_tensor = torch.tensor(np.array(batch['returns']), dtype=torch.float32, device=device)
+        old_log_probs_tensor = torch.tensor(batch['log_probs'], dtype=torch.float32, device=device)
+        value_tensor = torch.tensor(batch['values'], dtype=torch.float32, device=device)
 
         advantage = return_tensor - value_tensor
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)  # Normalize advantage
@@ -125,7 +128,7 @@ class PPOAgent:
 obs_shape = env.observation_space.shape
 action_dim = env.action_space.shape[0]
 
-policy = ActorCritic(obs_shape, action_dim)
+policy = ActorCritic(obs_shape, action_dim).to(device)
 optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
 agent = PPOAgent(env, policy, optimizer)
 
