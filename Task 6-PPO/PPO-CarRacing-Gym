@@ -71,7 +71,9 @@ policy = ActorCritic(obs_shape, action_dim)
 optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
 agent = PPOAgent(env, policy, optimizer)
 
-n_episodes = 5
+n_episodes = 1000
+
+all_episode_rewards = []  # <--- Add this before the for-loop
 
 for episode in range(n_episodes):
     obs, _ = env.reset()
@@ -93,43 +95,48 @@ for episode in range(n_episodes):
 
     # Compute returns and update
     returns = agent.compute_returns(rewards, values, dones)
-# Convert to tensors
-obs_tensor = torch.tensor(np.array(observations), dtype=torch.float32)
-action_tensor = torch.tensor(np.array(actions), dtype=torch.float32)
-return_tensor = torch.tensor(np.array(returns), dtype=torch.float32)
-value_tensor = torch.tensor(np.array(values), dtype=torch.float32)
+    # Convert to tensors
+    obs_tensor = torch.tensor(np.array(observations), dtype=torch.float32)
+    action_tensor = torch.tensor(np.array(actions), dtype=torch.float32)
+    return_tensor = torch.tensor(np.array(returns), dtype=torch.float32)
+    value_tensor = torch.tensor(np.array(values), dtype=torch.float32)
 
-# Compute advantage
-advantage = return_tensor - value_tensor
+    # Compute advantage
+    advantage = return_tensor - value_tensor
 
-# Recompute actions and values for the update (important for PPO!)
-action_pred, value_pred = policy(obs_tensor)
-value_pred = value_pred.squeeze()
+    # Recompute actions and values for the update (important for PPO!)
+    action_pred, value_pred = policy(obs_tensor)
+    value_pred = value_pred.squeeze()
 
-# Assume Gaussian policy for continuous actions
-dist = torch.distributions.Normal(action_pred, 0.1)  # std could be learned too
-log_probs = dist.log_prob(action_tensor).sum(axis=1)
+    # Assume Gaussian policy for continuous actions
+    dist = torch.distributions.Normal(action_pred, 0.1)  # std could be learned too
+    log_probs = dist.log_prob(action_tensor).sum(axis=1)
 
-# Compute new log_probs and old_log_probs
-with torch.no_grad():
-    old_log_probs = log_probs.clone()
+    # Compute new log_probs and old_log_probs
+    with torch.no_grad():
+        old_log_probs = log_probs.clone()
 
-# PPO ratio
-ratio = torch.exp(log_probs - old_log_probs)
+    # PPO ratio
+    ratio = torch.exp(log_probs - old_log_probs)
 
-# PPO clipped surrogate objective
-clip_adv = torch.clamp(ratio, 1 - agent.eps_clip, 1 + agent.eps_clip) * advantage
-loss_actor = -torch.min(ratio * advantage, clip_adv).mean()
+    # PPO clipped surrogate objective
+    clip_adv = torch.clamp(ratio, 1 - agent.eps_clip, 1 + agent.eps_clip) * advantage
+    loss_actor = -torch.min(ratio * advantage, clip_adv).mean()
 
-# Critic (value) loss
-loss_critic = (return_tensor - value_pred).pow(2).mean()
+    # Critic (value) loss
+    loss_critic = (return_tensor - value_pred).pow(2).mean()
 
-# Total loss
-loss = loss_actor + 0.5 * loss_critic
+    # Total loss
+    loss = loss_actor + 0.5 * loss_critic
 
-# Backpropagation
-optimizer.zero_grad()
-loss.backward()
-optimizer.step()
+    # Backpropagation
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
 
-print(f"Episode {episode}: Total reward = {sum(rewards):.2f}")
+    total_reward = sum(rewards)
+    all_episode_rewards.append(total_reward)  # <--- Append rewards
+
+    if episode % 10 == 0:
+        print(f"Episode {episode}: Total reward = {total_reward:.2f}")
+        print(f"Mean reward so far: {np.mean(all_episode_rewards[-100:]):.2f}")
