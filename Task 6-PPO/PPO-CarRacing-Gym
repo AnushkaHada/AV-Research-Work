@@ -2,8 +2,11 @@ import torch
 import torch.nn as nn
 import numpy as np
 import gymnasium as gym
+from torch.utils.tensorboard import SummaryWriter
+
 
 env = gym.make("CarRacing-v2", continuous=True)
+writer = SummaryWriter(log_dir="runs/ppo_carracing")
 
 class ActorCritic(nn.Module):
     def __init__(self, obs_shape, action_dim):
@@ -74,8 +77,11 @@ class PPOAgent:
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)  # Normalize advantage
 
         dataset_size = len(batch['obs'])
+
+        losses = {'actor': 0, 'critic': 0, 'total': 0}
+        count = 0
+
         for _ in range(epochs):
-            # Shuffle indices
             indices = np.arange(dataset_size)
             np.random.shuffle(indices)
 
@@ -105,6 +111,17 @@ class PPOAgent:
                 loss.backward()
                 self.optimizer.step()
 
+                losses['actor'] += loss_actor.item()
+                losses['critic'] += loss_critic.item()
+                losses['total'] += loss.item()
+                count += 1
+
+        for key in losses:
+            losses[key] /= count
+
+        return losses
+
+
 obs_shape = env.observation_space.shape
 action_dim = env.action_space.shape[0]
 
@@ -113,7 +130,7 @@ optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
 agent = PPOAgent(env, policy, optimizer)
 
 n_episodes = 1000
-batch_size = 2048  # total steps collected before each update
+batch_size = 2048  # total steps before update
 mini_batch_size = 64
 update_epochs = 10
 
@@ -129,7 +146,6 @@ batch = {
 }
 
 steps_collected = 0
-episode_rewards = []
 
 obs, _ = env.reset()
 done = False
@@ -155,20 +171,27 @@ for episode in range(n_episodes):
         if done:
             obs, _ = env.reset()
             all_episode_rewards.append(episode_reward)
+            writer.add_scalar("Reward/Episode", episode_reward, episode)
+            if episode >= 9:
+                mean_10 = np.mean(all_episode_rewards[-10:])
+                writer.add_scalar("Reward/Mean_Last_10", mean_10, episode)
             episode_reward = 0
             break
 
-        # Update policy when enough steps collected
         if steps_collected >= batch_size:
-            # Compute returns
             returns = agent.compute_returns(batch['rewards'], batch['values'], batch['dones'])
             batch['returns'] = returns
 
-            agent.update(batch, epochs=update_epochs, batch_size=mini_batch_size)
+            losses = agent.update(batch, epochs=update_epochs, batch_size=mini_batch_size)
 
-            # Clear batch
+            writer.add_scalar("Loss/Actor", losses['actor'], episode)
+            writer.add_scalar("Loss/Critic", losses['critic'], episode)
+            writer.add_scalar("Loss/Total", losses['total'], episode)
+
             batch = {k: [] for k in batch}
             steps_collected = 0
 
     if episode % 10 == 0:
         print(f"Episode {episode}: Mean reward last 10 episodes = {np.mean(all_episode_rewards[-10:]):.2f}")
+
+writer.close()
