@@ -4,7 +4,7 @@ import numpy as np
 import gymnasium as gym
 from torch.distributions import Categorical
 
-env = gym.make("CarRacing-v2", continuous=True, render_mode="rgb_array")
+env = gym.make("CarRacing-v2", continuous=True)
 
 import torch
 import torch.nn as nn
@@ -71,7 +71,7 @@ policy = ActorCritic(obs_shape, action_dim)
 optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
 agent = PPOAgent(env, policy, optimizer)
 
-n_episodes = 1000
+n_episodes = 5
 
 for episode in range(n_episodes):
     obs, _ = env.reset()
