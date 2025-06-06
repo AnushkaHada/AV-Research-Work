@@ -7,7 +7,7 @@ import gymnasium as gym
 from torch.utils.tensorboard import SummaryWriter
 
 
-env = gym.make("CarRacing-v2", continuous=True)
+env = gym.make("CarRacing-v2", continuous=True, render_mode=None)
 writer = SummaryWriter(log_dir="runs/ppo_carracing")
 
 class ActorCritic(nn.Module):
