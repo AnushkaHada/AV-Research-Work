@@ -1,22 +1,30 @@
 import torch
 import torch.nn as nn
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
+
 import numpy as np
 import gymnasium as gym
 from torch.utils.tensorboard import SummaryWriter
 
 
+
+# Use GPU is avalible. And check if it actually uses it. 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
+# flatten and normalize the observations. This helped make the reward negative. 
 def preprocess(obs):
-    return obs.transpose(2, 0, 1).astype(np.float32).reshape(-1) / 255.0  # flatten and normalize
+    return obs.transpose(2, 0, 1).astype(np.float32).reshape(-1) / 255.0  
 
-
+# As per Task 6, the environment is "CarRacing"
 env = gym.make("CarRacing-v2", continuous=True)
+# This is for tensorboard which I could not use due to Natulus being unavalible
 writer = SummaryWriter(log_dir="runs/ppo_carracing")
 
+# PPO needs an actor critic. Basically a model for policy(actor) and value estimation(critic)
 class ActorCritic(nn.Module):
     def __init__(self, obs_shape, action_dim):
         super().__init__()
+        # We have shared layers
         self.shared = nn.Sequential(
             nn.Flatten(),
             nn.Linear(np.prod(obs_shape), 256),
@@ -28,13 +36,15 @@ class ActorCritic(nn.Module):
             nn.Linear(256, action_dim),
             nn.Tanh()
         )
+        # Uses Tahn just like how it was mentioned in the paper. This bounds it to 1 and -1 
+        # Log_std is a learnable parameter for the standard deviation of the action distribution
         self.log_std = nn.Parameter(torch.ones(action_dim) * -0.5)
         self.critic = nn.Sequential(
             nn.Linear(256, 256),
             nn.ReLU(),
             nn.Linear(256, 1)
         )
-
+    # basic CNN code
     def forward(self, obs):
         base = self.shared(obs)
         mean = self.actor_mean(base)
@@ -43,6 +53,7 @@ class ActorCritic(nn.Module):
         return mean, std, value
 
     def act(self, obs):
+        # Samples action from distribution and returns value, action, and log probability
         with torch.no_grad():
             obs = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
             mean, std, value = self.forward(obs)
@@ -54,6 +65,7 @@ class ActorCritic(nn.Module):
 
 
 class PPOAgent:
+    # sets parameters
     def __init__(self, env, policy, optimizer, gamma=0.99, lam=0.95, eps_clip=0.2):
         self.env = env
         self.policy = policy
@@ -62,6 +74,7 @@ class PPOAgent:
         self.lam = lam
         self.eps_clip = eps_clip
 
+    # Generalized Advantage Estimation (GAE) as shown in research paper. 
     def compute_returns(self, rewards, values, dones):
         returns = []
         gae = 0
@@ -74,12 +87,14 @@ class PPOAgent:
         return returns
 
     def update(self, batch, epochs=4, batch_size=64):
+        # changes data to tensors
         obs_tensor = torch.tensor(np.array(batch['obs']), dtype=torch.float32, device=device)
         action_tensor = torch.tensor(np.array(batch['actions']), dtype=torch.float32, device=device)
         return_tensor = torch.tensor(np.array(batch['returns']), dtype=torch.float32, device=device)
         old_log_probs_tensor = torch.tensor(batch['log_probs'], dtype=torch.float32, device=device)
         value_tensor = torch.tensor(batch['values'], dtype=torch.float32, device=device)
 
+        # finds normalized advantage: return − value
         advantage = return_tensor - value_tensor
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)  # Normalize advantage
 
@@ -137,12 +152,13 @@ optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
 agent = PPOAgent(env, policy, optimizer)
 
 n_episodes = 1000
-batch_size = 2048  # total steps before update
+batch_size = 2048  # total steps before the update
 mini_batch_size = 64
 update_epochs = 10
 
 all_episode_rewards = []
 
+# collects all the information needed. The hyperparameters. 
 batch = {
     'obs': [],
     'actions': [],
@@ -165,6 +181,7 @@ for episode in range(n_episodes):
         next_obs, reward, terminated, truncated, _ = env.step(action)
         next_obs = preprocess(next_obs)
 
+        # Applies reward shaping
         reward += action[1] * 0.3 
         done = terminated or truncated
 
@@ -204,6 +221,8 @@ for episode in range(n_episodes):
             batch = {k: [] for k in batch}
             steps_collected = 0
 
+
+    # Just prints the mean average every 10 episodes. 
     if episode % 10 == 0:
         print(f"Episode {episode}: Mean reward last 10 episodes = {np.mean(all_episode_rewards[-10:]):.2f}")
 
