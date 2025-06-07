@@ -7,6 +7,10 @@ import gymnasium as gym
 from torch.utils.tensorboard import SummaryWriter
 
 
+def preprocess(obs):
+    return obs.transpose(2, 0, 1).astype(np.float32).reshape(-1) / 255.0  # flatten and normalize
+
+
 env = gym.make("CarRacing-v2", continuous=True)
 writer = SummaryWriter(log_dir="runs/ppo_carracing")
 
@@ -151,6 +155,7 @@ batch = {
 steps_collected = 0
 
 obs, _ = env.reset()
+obs = preprocess(obs)
 done = False
 
 for episode in range(n_episodes):
@@ -158,6 +163,8 @@ for episode in range(n_episodes):
     while True:
         action, value, log_prob = agent.policy.act(obs)
         next_obs, reward, terminated, truncated, _ = env.step(action)
+        next_obs = preprocess(next_obs)
+
         reward += action[1] * 0.3 
         done = terminated or truncated
 
@@ -174,6 +181,7 @@ for episode in range(n_episodes):
 
         if done:
             obs, _ = env.reset()
+            obs = preprocess(obs)
             all_episode_rewards.append(episode_reward)
             writer.add_scalar("Reward/Episode", episode_reward, episode)
             if episode >= 9:
