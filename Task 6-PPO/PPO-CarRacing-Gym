@@ -24,7 +24,7 @@ class ActorCritic(nn.Module):
             nn.Linear(256, action_dim),
             nn.Tanh()
         )
-        self.log_std = nn.Parameter(torch.zeros(action_dim))
+        self.log_std = nn.Parameter(torch.ones(action_dim) * -0.5)
         self.critic = nn.Sequential(
             nn.Linear(256, 256),
             nn.ReLU(),
@@ -44,7 +44,7 @@ class ActorCritic(nn.Module):
             mean, std, value = self.forward(obs)
             dist = torch.distributions.Normal(mean, std)
             action = dist.sample()
-            action = torch.clamp(action, -1, 1)
+            action = torch.clamp(action, -0.7, 0.7)
             log_prob = dist.log_prob(action).sum(dim=-1)
             return action.squeeze().cpu().numpy(), value.item(), log_prob.item()
 
@@ -158,6 +158,7 @@ for episode in range(n_episodes):
     while True:
         action, value, log_prob = agent.policy.act(obs)
         next_obs, reward, terminated, truncated, _ = env.step(action)
+        reward += action[1] * 0.3 
         done = terminated or truncated
 
         batch['obs'].append(obs)
