@@ -183,6 +183,7 @@ for episode in range(n_episodes):
             obs, _ = env.reset()
             obs = preprocess(obs)
             all_episode_rewards.append(episode_reward)
+            print(f"Episode {episode} reward: {episode_reward:.2f}")
             writer.add_scalar("Reward/Episode", episode_reward, episode)
             if episode >= 9:
                 mean_10 = np.mean(all_episode_rewards[-10:])
