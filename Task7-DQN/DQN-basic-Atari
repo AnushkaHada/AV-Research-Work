@@ -136,8 +136,8 @@ for episode in range(NUM_EPISODES):
             done
         )
         # update state 
-        print("State shape before push:", state.shape)           # (1, 1, 84, 84)
-        print("State shape after squeeze:", state.squeeze(0).shape) # (1, 84, 84)
+        #print("State shape before push:", state.shape)           # (1, 1, 84, 84)
+        #print("State shape after squeeze:", state.squeeze(0).shape) # (1, 84, 84)
         state = next_state
         episode_reward += reward  # add the rewards together. 
 
