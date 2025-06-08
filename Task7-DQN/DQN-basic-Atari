@@ -134,7 +134,7 @@ for episode in range(NUM_EPISODES):
         done = terminated or truncated
 
         # Clip reward 
-        reward = np.clip(reward, -1, 1)
+        #reward = np.clip(reward, -1, 1) caused more negative rewards
 
         next_state_processed = preprocess(next_obs)
 
