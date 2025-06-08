@@ -23,10 +23,12 @@ env = gym.make("CarRacing-v2", continuous = True, render_mode=None)
 # Since DQN is used for discrete action spaces instead of continouse:
 # Define discrete actions
 ACTIONS = [
-    np.array([0.0, 1.0, 0.0]),   # straight
-    np.array([-1.0, 1.0, 0.0]),  # left
-    np.array([1.0, 1.0, 0.0]),   # right
-    np.array([0.0, 0.0, 0.8])    # brake
+    [0.0, 1.0, 0.0],    # straight
+    [-0.5, 1.0, 0.0],   # slight left
+    [0.5, 1.0, 0.0],    # slight right
+    [-1.0, 1.0, 0.0],   # sharp left
+    [1.0, 1.0, 0.0],    # sharp right
+    [0.0, 0.0, 0.8]     # brake
 ]
 NUM_ACTIONS = len(ACTIONS)
 
