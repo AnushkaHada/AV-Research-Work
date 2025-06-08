@@ -174,11 +174,10 @@ for episode in range(NUM_EPISODES):
 
         # training is slow, so I train every: 
         TRAIN_EVERY = 4
+        # ---- TRAINING every TRAIN_EVERY steps ----
         if step_count % TRAIN_EVERY == 0 and len(replay_buffer) > BATCH_SIZE:
-            # if length of replay buffer bigger than batch size. 
-            # get information from replay buffer
             s, a, r, s_next, d = replay_buffer.sample(BATCH_SIZE)
-            # turn to tensors and store in device. 
+
             s = torch.tensor(s, dtype=torch.float32).to(device)
             s_next = torch.tensor(s_next, dtype=torch.float32).to(device)
             a = torch.tensor(a, dtype=torch.int64).to(device)
@@ -189,11 +188,17 @@ for episode in range(NUM_EPISODES):
             with torch.no_grad():
                 next_q_values = target_net(s_next).max(1)[0]
                 targets = r + GAMMA * next_q_values * (1 - d)
+
             loss = nn.MSELoss()(q_values, targets)
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(q_net.parameters(), 1.0)
             optimizer.step()
             losses.append(loss.item())
+
+        # ---- TARGET NETWORK UPDATE every TARGET_UPDATE_FREQ steps ----
+        if step_count % TARGET_UPDATE_FREQ == 0:
+            target_net.load_state_dict(q_net.state_dict())
     episode_rewards.append(episode_reward)
     epsilons.append(epsilon)
     
