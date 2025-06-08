@@ -94,7 +94,7 @@ EPSILON_END = 0.1
 EPSILON_DECAY = 50000
 REPLAY_SIZE = 100000
 LR = 1e-4
-NUM_EPISODES = 1000
+NUM_EPISODES = 600
 
 
 # initialize the dqn network and move it to device
@@ -136,7 +136,7 @@ for episode in range(NUM_EPISODES):
     # If episode is finished or not
     done = False
     step = 0 
-    MAX_STEPS_PER_EPISODE = 1000
+    MAX_STEPS_PER_EPISODE = 500
     while not done and step < MAX_STEPS_PER_EPISODE:
         step += 1  
         # while episode is not finished. 
@@ -188,7 +188,7 @@ for episode in range(NUM_EPISODES):
 
             # Check for shape issues or NaNs in input
             if torch.isnan(s_next).any() or s_next.shape != torch.Size([BATCH_SIZE, 4, 84, 84]):
-                print("🚨 Warning: Bad s_next detected — skipping this training step")
+                print(" Warning: Bad s_next detected — skipping this training step")
                 continue
 
             try:
@@ -204,7 +204,7 @@ for episode in range(NUM_EPISODES):
                 optimizer.step()
                 losses.append(loss.item())
             except Exception as e:
-                print(f"❌ Error during training step: {e}")
+                print(f" Error during training step: {e}")
                 continue
 
         # ---- TARGET NETWORK UPDATE every TARGET_UPDATE_FREQ steps ----
