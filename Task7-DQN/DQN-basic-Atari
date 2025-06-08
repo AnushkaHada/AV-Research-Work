@@ -122,12 +122,13 @@ episode_rewards = []
 epsilons = []
 losses = []
 
-# training 
+# training
+frame_stack = FrameStack(k=4) 
 for episode in range(NUM_EPISODES):
     obs, _ = env.reset() #reset env each episode. 
     # turn into tensor and use device.
-    state_processed = preprocess(obs)  # shape (84, 84)
-    state = torch.tensor(state_processed, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device) / 255.0
+    state_np = frame_stack.reset(obs)  # shape (4, 84, 84)
+    state = torch.tensor(state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0  # shape (1, 4, 84, 84)
     episode_reward = 0
     
     # If episode is finished or not
@@ -153,17 +154,17 @@ for episode in range(NUM_EPISODES):
         # Clip reward 
         #reward = np.clip(reward, -1, 1) caused more negative rewards
 
-        next_state_processed = preprocess(next_obs)
-
-        next_state = torch.tensor(next_state_processed, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device) / 255.0
+        next_state_np = frame_stack.step(next_obs)
+        next_state = torch.tensor(next_state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
 
         replay_buffer.push(
-            state.squeeze(0).detach().cpu().numpy(),       # shape (1, 84, 84)
+            state.squeeze(0).cpu().numpy(),       # shape (4, 84, 84)
             action_idx,
             reward,
-            next_state.squeeze(0).detach().cpu().numpy(),  # shape (1, 84, 84)
+            next_state.squeeze(0).cpu().numpy(),  # shape (4, 84, 84)
             done
         )
+
         # update state 
         #print("State shape before push:", state.shape)           # (1, 1, 84, 84)
         #print("State shape after squeeze:", state.squeeze(0).shape) # (1, 84, 84)
