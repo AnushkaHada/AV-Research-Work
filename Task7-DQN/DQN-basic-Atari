@@ -1,0 +1,140 @@
+# Task 7: Implement DQN from scratch using gymnasium Car Racing environment. 
+import gymnasium as gym
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import random
+from collections import deque
+
+
+# using GPU for faster computation. 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Device:", device)
+
+# Same environment as before, Car Racing. 
+env = gym.make("CarRacing-v2", continuous = True)
+
+# Since DQN is used for discrete action spaces instead of continouse:
+# Define discrete actions
+ACTIONS = [
+    np.array([0.0, 1.0, 0.0]),   # straight
+    np.array([-1.0, 1.0, 0.0]),  # left
+    np.array([1.0, 1.0, 0.0]),   # right
+    np.array([0.0, 0.0, 0.8])    # brake
+]
+NUM_ACTIONS = len(ACTIONS)
+
+
+# DQN algorithm 
+
+class DQN(nn.Module):
+    # Basic CNN neural network.
+    def __init__(self, obs_shape, num_actions):
+        super().__init__()
+        c, h, w = obs_shape
+        self.net = nn.Sequential(
+            nn.Conv2d(c, 32, 8, stride = 4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, stride=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(64 * 9 * 9, 512), # changed 7 to 9 
+            nn.ReLU(),
+            nn.Linear(512, num_actions)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.buffer = deque( maxlen = capacity)
+    def push(self, state, action, reward, next_state, done):
+        # takes in all the actions of the agent. 
+        self.buffer.append((state, action, reward, next_state, done))
+    def sample(self, batch_size):
+        # randomly gets batches based on random size
+        batch = random.sample(self.buffer, batch_size)
+        state, action, reward, next_state, done = map(np.array, zip(*batch))
+        return state, action, reward, next_state, done
+    def __len__(self):
+        return len(self.buffer)
+
+# Hyperparameters
+BATCH_SIZE = 32
+GAMMA = 0.99
+EPSILON_START = 1.0
+EPSILON_END = 0.1
+EPSILON_DECAY = 50000
+REPLAY_SIZE = 100000
+LR = 1e-4
+NUM_EPISODES = 1000
+
+
+# initialize the dqn network and move it to device
+q_net = DQN((3, 96, 96), NUM_ACTIONS).to(device)
+# optimizer is adam
+optimizer = optim.Adam(q_net.parameters(), lr = LR)
+replay_buffer = ReplayBuffer(REPLAY_SIZE)
+
+epsilon = EPSILON_START
+step_count = 0
+
+
+# training 
+for episode in range(NUM_EPISODES):
+    obs, _ = env.reset() #reset env each episode. 
+    # turn into tensor and use device.
+    state = torch.tensor(obs, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
+    episode_reward = 0
+    
+    # If episode is finished or not
+    done = False
+
+    while not done:
+        # while episode is not finished. 
+        step_count += 1 # increment step count.
+        epsilon = EPSILON_END + (EPSILON_START - EPSILON_END) * np.exp(-1.0 * step_count / EPSILON_DECAY)
+        # Epsilon-greedy action selection
+        if random.random() < epsilon: 
+            action_idx = random.randrange(NUM_ACTIONS) # get random range
+        else:
+            with torch.no_grad():
+                q_values = q_net(state)
+                action_idx = q_values.argmax().item()
+        action = ACTIONS[action_idx]
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+
+        next_state = torch.tensor(next_obs, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
+        replay_buffer.push(state.cpu().numpy(),action_idx, reward, next_state.cpu().numpy(), done)
+
+        # update state 
+        state = next_state
+        episode_reward += reward  # add the rewards together. 
+
+
+        # training 
+        if len(replay_buffer) > BATCH_SIZE:
+            # if length of replay buffer bigger than batch size. 
+            # get information from replay buffer
+            s, a, r, s_next, d = replay_buffer.sample(BATCH_SIZE)
+            # turn to tensors and store in device. 
+            s = torch.tensor(s, dtype=torch.float32).to(device).squeeze(1)       
+            a = torch.tensor(a, dtype=torch.int64).to(device)
+            r = torch.tensor(r, dtype=torch.float32).to(device)
+            s_next = torch.tensor(s_next, dtype=torch.float32).to(device).squeeze(1)  
+            d = torch.tensor(d, dtype=torch.float32).to(device)
+
+            q_values = q_net(s).gather(1, a.unsqueeze(1)).squeeze()
+            with torch.no_grad():
+                next_q_values = q_net(s_next).max(1)[0]
+                targets = r + GAMMA * next_q_values * (1 - d)
+            loss = nn.MSELoss()(q_values, targets)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+    print(f"Episode {episode} - Reward: {episode_reward:.2f} - Epsilon: {epsilon:.3f}")
+
