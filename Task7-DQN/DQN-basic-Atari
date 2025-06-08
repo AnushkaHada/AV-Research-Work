@@ -94,7 +94,7 @@ EPSILON_END = 0.1
 EPSILON_DECAY = 50000
 REPLAY_SIZE = 100000
 LR = 1e-4
-NUM_EPISODES = 400
+NUM_EPISODES = 600
 
 
 # initialize the dqn network and move it to device
@@ -136,7 +136,7 @@ for episode in range(NUM_EPISODES):
     # If episode is finished or not
     done = False
     step = 0 
-    MAX_STEPS_PER_EPISODE = 600
+    MAX_STEPS_PER_EPISODE = 400
     while not done and step < MAX_STEPS_PER_EPISODE:
         step += 1  
         # while episode is not finished. 
