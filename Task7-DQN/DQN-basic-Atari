@@ -80,6 +80,18 @@ NUM_EPISODES = 1000
 
 # initialize the dqn network and move it to device
 q_net = DQN((1, 84, 84), NUM_ACTIONS).to(device)
+
+
+target_net = DQN((1, 84, 84), NUM_ACTIONS).to(device)
+target_net.load_state_dict(q_net.state_dict())  # Copy weights initially
+target_net.eval()  # Target network is not trained directly
+
+TARGET_UPDATE_FREQ = 1000  # How often to update target_net
+
+
+
+
+
 # optimizer is adam
 optimizer = optim.Adam(q_net.parameters(), lr = LR)
 replay_buffer = ReplayBuffer(REPLAY_SIZE)
@@ -122,7 +134,7 @@ for episode in range(NUM_EPISODES):
         done = terminated or truncated
 
         # Clip reward 
-        # reward = np.clip(reward, -1, 1)
+        reward = np.clip(reward, -1, 1)
 
         next_state_processed = preprocess(next_obs)
 
@@ -157,7 +169,7 @@ for episode in range(NUM_EPISODES):
 
             q_values = q_net(s).gather(1, a.unsqueeze(1)).squeeze()
             with torch.no_grad():
-                next_q_values = q_net(s_next).max(1)[0]
+                next_q_values = target_net(s_next).max(1)[0]
                 targets = r + GAMMA * next_q_values * (1 - d)
             loss = nn.MSELoss()(q_values, targets)
             optimizer.zero_grad()
