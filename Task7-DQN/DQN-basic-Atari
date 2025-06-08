@@ -136,7 +136,7 @@ for episode in range(NUM_EPISODES):
     # If episode is finished or not
     done = False
     step = 0 
-    MAX_STEPS_PER_EPISODE = 500
+    MAX_STEPS_PER_EPISODE = 300
     while not done and step < MAX_STEPS_PER_EPISODE:
         step += 1  
         # while episode is not finished. 
