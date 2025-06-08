@@ -13,7 +13,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Device:", device)
 
 # Same environment as before, Car Racing. 
-env = gym.make("CarRacing-v2", continuous = True)
+env = gym.make("CarRacing-v2", continuous = True, render_mode=None)
 
 # Since DQN is used for discrete action spaces instead of continouse:
 # Define discrete actions
@@ -41,7 +41,7 @@ class DQN(nn.Module):
             nn.Conv2d(64, 64, 3, stride=1),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * 9 * 9, 512), # changed 7 to 9 
+            nn.Linear(64 * 8 * 8, 512), # changed 7 to 9 
             nn.ReLU(),
             nn.Linear(512, num_actions)
         )
@@ -109,15 +109,16 @@ for episode in range(NUM_EPISODES):
         done = terminated or truncated
 
         next_state = torch.tensor(next_obs, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
-        replay_buffer.push(state.cpu().numpy(),action_idx, reward, next_state.cpu().numpy(), done)
+        replay_buffer.push(state.squeeze(0), action_idx, reward, next_state.squeeze(0), done)
 
         # update state 
         state = next_state
         episode_reward += reward  # add the rewards together. 
 
 
-        # training 
-        if len(replay_buffer) > BATCH_SIZE:
+        # training is slow, so I train every: 
+        TRAIN_EVERY = 4
+        if step_count % TRAIN_EVERY == 0 and len(replay_buffer) > BATCH_SIZE:
             # if length of replay buffer bigger than batch size. 
             # get information from replay buffer
             s, a, r, s_next, d = replay_buffer.sample(BATCH_SIZE)
