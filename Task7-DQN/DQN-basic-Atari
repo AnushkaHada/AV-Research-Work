@@ -97,8 +97,10 @@ for episode in range(NUM_EPISODES):
     
     # If episode is finished or not
     done = False
+    step = 0 
 
     while not done:
+        step += 1  
         # while episode is not finished. 
         step_count += 1 # increment step count.
         epsilon = EPSILON_END + (EPSILON_START - EPSILON_END) * np.exp(-1.0 * step_count / EPSILON_DECAY)
