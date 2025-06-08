@@ -129,13 +129,15 @@ for episode in range(NUM_EPISODES):
         next_state = torch.tensor(next_state_processed, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device) / 255.0
 
         replay_buffer.push(
-            state.detach().cpu().numpy(),
+            state.squeeze(0).detach().cpu().numpy(),       # shape (1, 84, 84)
             action_idx,
             reward,
-            next_state.detach().cpu().numpy(),
+            next_state.squeeze(0).detach().cpu().numpy(),  # shape (1, 84, 84)
             done
         )
         # update state 
+        print("State shape before push:", state.shape)           # (1, 1, 84, 84)
+        print("State shape after squeeze:", state.squeeze(0).shape) # (1, 84, 84)
         state = next_state
         episode_reward += reward  # add the rewards together. 
 
