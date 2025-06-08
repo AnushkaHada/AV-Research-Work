@@ -6,7 +6,12 @@ import torch.optim as optim
 import numpy as np
 import random
 from collections import deque
+import cv2
 
+def preprocess(obs):
+    gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
+    resized = cv2.resize(gray, (84, 84), interpolation=cv2.INTER_AREA)
+    return resized
 
 # using GPU for faster computation. 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,14 +39,14 @@ class DQN(nn.Module):
         super().__init__()
         c, h, w = obs_shape
         self.net = nn.Sequential(
-            nn.Conv2d(c, 32, 8, stride = 4),
+            nn.Conv2d(c, 32, 8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, 4, stride=2),
             nn.ReLU(),
             nn.Conv2d(64, 64, 3, stride=1),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * 8 * 8, 512), # changed from 9 to 8 to fix bug 
+            nn.Linear(64 * 7 * 7, 512),  # change here
             nn.ReLU(),
             nn.Linear(512, num_actions)
         )
@@ -74,7 +79,7 @@ NUM_EPISODES = 1000
 
 
 # initialize the dqn network and move it to device
-q_net = DQN((3, 96, 96), NUM_ACTIONS).to(device)
+q_net = DQN((1, 84, 84), NUM_ACTIONS).to(device)
 # optimizer is adam
 optimizer = optim.Adam(q_net.parameters(), lr = LR)
 replay_buffer = ReplayBuffer(REPLAY_SIZE)
@@ -92,7 +97,8 @@ losses = []
 for episode in range(NUM_EPISODES):
     obs, _ = env.reset() #reset env each episode. 
     # turn into tensor and use device.
-    state = torch.tensor(obs, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
+    state_processed = preprocess(obs)  # shape (84, 84)
+    state = torch.tensor(state_processed, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device) / 255.0
     episode_reward = 0
     
     # If episode is finished or not
@@ -116,9 +122,12 @@ for episode in range(NUM_EPISODES):
         done = terminated or truncated
 
         # Clip reward 
-        reward = np.clip(reward, -1, 1)
+        # reward = np.clip(reward, -1, 1)
 
-        next_state = torch.tensor(next_obs, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
+        next_state_processed = preprocess(next_obs)
+
+        next_state = torch.tensor(next_state_processed, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device) / 255.0
+
         replay_buffer.push(
             state.detach().cpu().numpy(),
             action_idx,
@@ -138,10 +147,10 @@ for episode in range(NUM_EPISODES):
             # get information from replay buffer
             s, a, r, s_next, d = replay_buffer.sample(BATCH_SIZE)
             # turn to tensors and store in device. 
-            s = torch.tensor(s, dtype=torch.float32).to(device).squeeze(1)       
+            s = torch.tensor(s, dtype=torch.float32).to(device)
+            s_next = torch.tensor(s_next, dtype=torch.float32).to(device)
             a = torch.tensor(a, dtype=torch.int64).to(device)
             r = torch.tensor(r, dtype=torch.float32).to(device)
-            s_next = torch.tensor(s_next, dtype=torch.float32).to(device).squeeze(1)  
             d = torch.tensor(d, dtype=torch.float32).to(device)
 
             q_values = q_net(s).gather(1, a.unsqueeze(1)).squeeze()
