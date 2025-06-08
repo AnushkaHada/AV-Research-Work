@@ -202,7 +202,7 @@ for episode in range(NUM_EPISODES):
     episode_rewards.append(episode_reward)
     epsilons.append(epsilon)
     
-    print(f"Episode {episode} ended after {step} steps")
+    #print(f"Episode {episode} ended after {step} steps")
 
 
     print(f"Episode {episode} - Reward: {episode_reward:.2f} - Epsilon: {epsilon:.3f}")
