@@ -186,17 +186,26 @@ for episode in range(NUM_EPISODES):
             r = torch.tensor(r, dtype=torch.float32).to(device)
             d = torch.tensor(d, dtype=torch.float32).to(device)
 
-            q_values = q_net(s).gather(1, a.unsqueeze(1)).squeeze()
-            with torch.no_grad():
-                next_q_values = target_net(s_next).max(1)[0]
-                targets = r + GAMMA * next_q_values * (1 - d)
+            # Check for shape issues or NaNs in input
+            if torch.isnan(s_next).any() or s_next.shape != torch.Size([BATCH_SIZE, 4, 84, 84]):
+                print("🚨 Warning: Bad s_next detected — skipping this training step")
+                continue
 
-            loss = nn.MSELoss()(q_values, targets)
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(q_net.parameters(), 1.0)
-            optimizer.step()
-            losses.append(loss.item())
+            try:
+                q_values = q_net(s).gather(1, a.unsqueeze(1)).squeeze()
+                with torch.no_grad():
+                    next_q_values = target_net(s_next).max(1)[0]
+                    targets = r + GAMMA * next_q_values * (1 - d)
+
+                loss = nn.MSELoss()(q_values, targets)
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(q_net.parameters(), 1.0)
+                optimizer.step()
+                losses.append(loss.item())
+            except Exception as e:
+                print(f"❌ Error during training step: {e}")
+                continue
 
         # ---- TARGET NETWORK UPDATE every TARGET_UPDATE_FREQ steps ----
         if step_count % TARGET_UPDATE_FREQ == 0:
