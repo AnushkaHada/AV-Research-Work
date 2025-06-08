@@ -109,8 +109,13 @@ for episode in range(NUM_EPISODES):
         done = terminated or truncated
 
         next_state = torch.tensor(next_obs, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
-        replay_buffer.push(state.squeeze(0), action_idx, reward, next_state.squeeze(0), done)
-
+        replay_buffer.push(
+            state.detach().cpu().numpy(),
+            action_idx,
+            reward,
+            next_state.detach().cpu().numpy(),
+            done
+        )
         # update state 
         state = next_state
         episode_reward += reward  # add the rewards together. 
