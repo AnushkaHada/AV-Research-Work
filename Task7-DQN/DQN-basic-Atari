@@ -217,9 +217,11 @@ for episode in range(NUM_EPISODES):
         
         # Check time here inside episode steps
         elapsed = time.time() - start_training_time
-        if elapsed > 60:  # 60 seconds timeout
-            print(f"Stopping training after {elapsed:.2f} seconds (episode {episode}, step {step}).")
-            break
+        if elapsed > 60:
+            print(f"Stopping episode early after {elapsed:.2f} seconds — moving to next episode.")
+            episode_rewards.append(episode_reward)
+            epsilons.append(epsilon)
+            continue  # Go to the next episode
 
     episode_rewards.append(episode_reward)
     epsilons.append(epsilon)
