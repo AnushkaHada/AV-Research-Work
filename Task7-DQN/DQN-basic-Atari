@@ -9,8 +9,6 @@ from collections import deque
 import cv2
 import time
 
-
-
 def preprocess(obs):
     gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
     resized = cv2.resize(gray, (84, 84), interpolation=cv2.INTER_AREA)
@@ -71,6 +69,7 @@ class ReplayBuffer:
         return state, action, reward, next_state, done
     def __len__(self):
         return len(self.buffer)
+
 class FrameStack:
     def __init__(self, k):
         self.k = k
@@ -98,20 +97,16 @@ EPSILON_DECAY = 50000
 REPLAY_SIZE = 100000
 LR = 1e-4
 NUM_EPISODES = 600
-
+TARGET_UPDATE_FREQ = 1000
+MAX_STEPS_PER_EPISODE = 400
+TRAIN_EVERY = 4
+TIME_LIMIT_PER_EPISODE = 60
 
 # initialize the dqn network and move it to device
 q_net = DQN((4, 84, 84), NUM_ACTIONS).to(device)
-
-
 target_net = DQN((4, 84, 84), NUM_ACTIONS).to(device)
 target_net.load_state_dict(q_net.state_dict())  # Copy weights initially
 target_net.eval()  # Target network is not trained directly
-
-TARGET_UPDATE_FREQ = 1000  # How often to update target_net
-
-
-
 
 
 # optimizer is adam
@@ -129,18 +124,17 @@ losses = []
 
 # training
 frame_stack = FrameStack(k=4)
-start_training_time = time.time()  # record start time before training loop
+
 for episode in range(NUM_EPISODES):
     obs, _ = env.reset() #reset env each episode. 
     # turn into tensor and use device.
     state_np = frame_stack.reset(obs)  # shape (4, 84, 84)
     state = torch.tensor(state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0  # shape (1, 4, 84, 84)
     episode_reward = 0
-    
-    # If episode is finished or not
-    done = False
+    done = False # If episode is finished or not
     step = 0 
-    MAX_STEPS_PER_EPISODE = 400
+    episode_start_time = time.time()
+
     while not done and step < MAX_STEPS_PER_EPISODE:
         step += 1  
         # while episode is not finished. 
@@ -153,6 +147,7 @@ for episode in range(NUM_EPISODES):
             with torch.no_grad():
                 q_values = q_net(state)
                 action_idx = q_values.argmax().item()
+        
         action = ACTIONS[action_idx]
         next_obs, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
@@ -174,12 +169,10 @@ for episode in range(NUM_EPISODES):
         # update state 
         #print("State shape before push:", state.shape)           # (1, 1, 84, 84)
         #print("State shape after squeeze:", state.squeeze(0).shape) # (1, 84, 84)
+        
         state = next_state
         episode_reward += reward  # add the rewards together. 
 
-
-        # training is slow, so I train every: 
-        TRAIN_EVERY = 4
         # ---- TRAINING every TRAIN_EVERY steps ----
         if step_count % TRAIN_EVERY == 0 and len(replay_buffer) > BATCH_SIZE:
             s, a, r, s_next, d = replay_buffer.sample(BATCH_SIZE)
@@ -216,24 +209,16 @@ for episode in range(NUM_EPISODES):
             target_net.load_state_dict(q_net.state_dict())
         
         # Check time here inside episode steps
-        elapsed = time.time() - start_training_time
-        if elapsed > 60:
-            print(f"Stopping episode early after {elapsed:.2f} seconds — moving to next episode.")
-            episode_rewards.append(episode_reward)
-            epsilons.append(epsilon)
-            continue  # Go to the next episode
+        if time.time() - episode_start_time > TIME_LIMIT_PER_EPISODE:
+            break
 
     episode_rewards.append(episode_reward)
     epsilons.append(epsilon)
-    
     print(f"Episode {episode} - Reward: {episode_reward:.2f} - Epsilon: {epsilon:.3f}")
     
     if episode % 10 == 0 and episode > 0:
         avg_reward = np.mean(episode_rewards[-10:])
         avg_loss = np.mean(losses[-100:]) if losses else 0
-        
         print(f"[Episode {episode}] Avg Reward (last 10): {avg_reward:.2f}")
         print(f"[Episode {episode}] Avg Loss (last 100 steps): {avg_loss:.5f}")
-    if elapsed > 60:  # also break outer episode loop after timeout
-        break
 
