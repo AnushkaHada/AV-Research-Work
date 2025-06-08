@@ -41,7 +41,7 @@ class DQN(nn.Module):
             nn.Conv2d(64, 64, 3, stride=1),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * 8 * 8, 512), # changed 7 to 9 
+            nn.Linear(64 * 8 * 8, 512), # changed from 9 to 8 to fix bug 
             nn.ReLU(),
             nn.Linear(512, num_actions)
         )
@@ -83,6 +83,11 @@ epsilon = EPSILON_START
 step_count = 0
 
 
+# for graphing 
+episode_rewards = []
+epsilons = []
+losses = []
+
 # training 
 for episode in range(NUM_EPISODES):
     obs, _ = env.reset() #reset env each episode. 
@@ -107,6 +112,9 @@ for episode in range(NUM_EPISODES):
         action = ACTIONS[action_idx]
         next_obs, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
+
+        # Clip reward 
+        reward = np.clip(reward, -1, 1)
 
         next_state = torch.tensor(next_obs, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
         replay_buffer.push(
@@ -142,5 +150,17 @@ for episode in range(NUM_EPISODES):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            losses.append(loss.item())
+    episode_rewards.append(episode_reward)
+    epsilons.append(epsilon)
+
+
     print(f"Episode {episode} - Reward: {episode_reward:.2f} - Epsilon: {epsilon:.3f}")
+    
+    if episode % 10 == 0 and episode > 0:
+        avg_reward = np.mean(episode_rewards[-10:])
+        avg_loss = np.mean(losses[-100:]) if losses else 0
+        
+        print(f"[Episode {episode}] Avg Reward (last 10): {avg_reward:.2f}")
+        print(f"[Episode {episode}] Avg Loss (last 100 steps): {avg_loss:.5f}")
 
