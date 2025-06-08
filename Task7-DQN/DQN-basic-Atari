@@ -7,6 +7,9 @@ import numpy as np
 import random
 from collections import deque
 import cv2
+import time
+
+
 
 def preprocess(obs):
     gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
@@ -125,7 +128,8 @@ epsilons = []
 losses = []
 
 # training
-frame_stack = FrameStack(k=4) 
+frame_stack = FrameStack(k=4)
+start_training_time = time.time()  # record start time before training loop
 for episode in range(NUM_EPISODES):
     obs, _ = env.reset() #reset env each episode. 
     # turn into tensor and use device.
@@ -210,12 +214,16 @@ for episode in range(NUM_EPISODES):
         # ---- TARGET NETWORK UPDATE every TARGET_UPDATE_FREQ steps ----
         if step_count % TARGET_UPDATE_FREQ == 0:
             target_net.load_state_dict(q_net.state_dict())
+        
+        # Check time here inside episode steps
+        elapsed = time.time() - start_training_time
+        if elapsed > 60:  # 60 seconds timeout
+            print(f"Stopping training after {elapsed:.2f} seconds (episode {episode}, step {step}).")
+            break
+
     episode_rewards.append(episode_reward)
     epsilons.append(epsilon)
     
-    #print(f"Episode {episode} ended after {step} steps")
-
-
     print(f"Episode {episode} - Reward: {episode_reward:.2f} - Epsilon: {epsilon:.3f}")
     
     if episode % 10 == 0 and episode > 0:
@@ -224,4 +232,6 @@ for episode in range(NUM_EPISODES):
         
         print(f"[Episode {episode}] Avg Reward (last 10): {avg_reward:.2f}")
         print(f"[Episode {episode}] Avg Loss (last 100 steps): {avg_loss:.5f}")
+    if elapsed > 60:  # also break outer episode loop after timeout
+        break
 
