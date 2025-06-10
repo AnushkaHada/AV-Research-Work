@@ -174,7 +174,7 @@ for episode in range(NUM_EPISODES):
 
         # Clip reward 
         #reward = np.clip(reward, -1, 1) caused more negative rewards
-        reward = scale_reward(reward)
+        
         next_state_np = frame_stack.step(next_obs)
         next_state = torch.tensor(next_state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
 
