@@ -82,6 +82,8 @@ class PrioritizedReplayBuffer:
         self.priorities = deque(maxlen=capacity)
         self.pos = 0
         self.alpha = alpha
+    def __len__(self):
+        return len(self.buffer)
 
     def push(self, state, action, reward, next_state, done):
         max_priority = max(self.priorities, default=1.0)
