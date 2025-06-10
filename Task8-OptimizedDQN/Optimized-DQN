@@ -35,6 +35,8 @@ ACTIONS = [
     [-1.0, 0.5, 0.0],     # sharp left half throttle
     [1.0, 0.5, 0.0],      # sharp right half throttle
 ]
+ACTIONS.append([0.0, 0.0, 0.0])  # do nothing (coast)
+
 NUM_ACTIONS = len(ACTIONS)
 
 
@@ -94,23 +96,17 @@ class FrameStack:
         return np.stack(self.frames, axis=0)  # shape (k, 84, 84)
 
 
-def scale_reward(r):
-    # Smooth clipping between -1 and 1
-    return np.tanh(r)
-
-
-
 # Hyperparameters
 BATCH_SIZE = 16
 GAMMA = 0.99
 EPSILON_START = 1.0
 EPSILON_END = 0.1
-EPSILON_DECAY = 100000 # Increased
+EPSILON_DECAY = 200000 # Increased
 REPLAY_SIZE = 100000 # Increased replay size
 LR = 1e-5
 NUM_EPISODES = 2000
 TARGET_UPDATE_FREQ = 1000
-MAX_STEPS_PER_EPISODE = 1000 # increa
+MAX_STEPS_PER_EPISODE = 2000 # increa
 TRAIN_EVERY = 2 # changed 
 TIME_LIMIT_PER_EPISODE = 60
 
