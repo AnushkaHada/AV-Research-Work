@@ -23,13 +23,17 @@ env = gym.make("CarRacing-v2", continuous = True, render_mode="rgb_array")
 
 # Since DQN is used for discrete action spaces instead of continouse:
 # Define discrete actions
+# Added more actions
 ACTIONS = [
-    [0.0, 1.0, 0.0],    # straight
-    [-0.5, 1.0, 0.0],   # slight left
-    [0.5, 1.0, 0.0],    # slight right
-    [-1.0, 1.0, 0.0],   # sharp left
-    [1.0, 1.0, 0.0],    # sharp right
-    [0.0, 0.0, 0.8]     # brake
+    [0.0, 1.0, 0.0],      # straight
+    [-0.25, 1.0, 0.0],    # slight left
+    [0.25, 1.0, 0.0],     # slight right
+    [-0.5, 1.0, 0.0],     # more left
+    [0.5, 1.0, 0.0],      # more right
+    [-1.0, 1.0, 0.0],     # sharp left
+    [1.0, 1.0, 0.0],      # sharp right
+    [0.0, 0.5, 0.0],      # half throttle
+    [0.0, 0.0, 0.8],      # brake
 ]
 NUM_ACTIONS = len(ACTIONS)
 
@@ -55,7 +59,8 @@ class DQN(nn.Module):
         )
     def forward(self, x):
         return self.net(x)
-
+# Replace buffer with better one?
+"""
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque( maxlen = capacity)
@@ -69,6 +74,56 @@ class ReplayBuffer:
         return state, action, reward, next_state, done
     def __len__(self):
         return len(self.buffer)
+"""
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity, alpha=0.6):
+        self.capacity = capacity
+        self.buffer = []
+        self.priorities = deque(maxlen=capacity)
+        self.pos = 0
+        self.alpha = alpha
+
+    def push(self, state, action, reward, next_state, done):
+        max_priority = max(self.priorities, default=1.0)
+
+        if len(self.buffer) < self.capacity:
+            self.buffer.append((state, action, reward, next_state, done))
+            self.priorities.append(max_priority)
+        else:
+            self.buffer[self.pos] = (state, action, reward, next_state, done)
+            self.priorities[self.pos] = max_priority
+            self.pos = (self.pos + 1) % self.capacity
+
+    def sample(self, batch_size, beta=0.4):
+        priorities = np.array(self.priorities, dtype=np.float32)
+        probs = priorities ** self.alpha
+        probs /= probs.sum()
+
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
+        samples = [self.buffer[idx] for idx in indices]
+
+        # IS weights
+        total = len(self.buffer)
+        weights = (total * probs[indices]) ** (-beta)
+        weights /= weights.max()
+        weights = np.array(weights, dtype=np.float32)
+
+        states, actions, rewards, next_states, dones = zip(*samples)
+        return (
+            np.array(states),
+            np.array(actions),
+            np.array(rewards),
+            np.array(next_states),
+            np.array(dones),
+            indices,
+            weights,
+        )
+
+    def update_priorities(self, indices, new_priorities):
+        for idx, prio in zip(indices, new_priorities):
+            self.priorities[idx] = prio
+
+
 
 class FrameStack:
     def __init__(self, k):
@@ -93,13 +148,13 @@ BATCH_SIZE = 16
 GAMMA = 0.99
 EPSILON_START = 1.0
 EPSILON_END = 0.1
-EPSILON_DECAY = 50000
-REPLAY_SIZE = 50000 # incresed replay size
-LR = 1e-4
+EPSILON_DECAY = 100000 # Increased
+REPLAY_SIZE = 100000 # Increased replay size
+LR = 1e-5
 NUM_EPISODES = 2000
 TARGET_UPDATE_FREQ = 1000
-MAX_STEPS_PER_EPISODE = 400
-TRAIN_EVERY = 4
+MAX_STEPS_PER_EPISODE = 1000 # increased 
+TRAIN_EVERY = 10
 TIME_LIMIT_PER_EPISODE = 60
 
 # initialize the dqn network and move it to device
@@ -111,7 +166,11 @@ target_net.eval()  # Target network is not trained directly
 
 # optimizer is adam
 optimizer = optim.Adam(q_net.parameters(), lr = LR)
-replay_buffer = ReplayBuffer(REPLAY_SIZE)
+#replay_buffer = ReplayBuffer(REPLAY_SIZE)
+#replaced 
+replay_buffer = PrioritizedReplayBuffer(REPLAY_SIZE)
+beta_start = 0.4
+beta_frames = 100000  # How quickly beta approaches 1
 
 epsilon = EPSILON_START
 step_count = 0
@@ -144,6 +203,8 @@ for episode in range(NUM_EPISODES):
         # while episode is not finished. 
         step_count += 1 # increment step count.
         epsilon = EPSILON_END + (EPSILON_START - EPSILON_END) * np.exp(-1.0 * step_count / EPSILON_DECAY)
+        beta = min(1.0, beta_start + (1.0 - beta_start) * step_count / beta_frames)
+
         # Epsilon-greedy action selection
         if random.random() < epsilon: 
             action_idx = random.randrange(NUM_ACTIONS) # get random range
@@ -183,13 +244,14 @@ for episode in range(NUM_EPISODES):
 
         # ---- TRAINING every TRAIN_EVERY steps ----
         if step_count % TRAIN_EVERY == 0 and len(replay_buffer) > BATCH_SIZE:
-            s, a, r, s_next, d = replay_buffer.sample(BATCH_SIZE)
+            s, a, r, s_next, d, indices, weights = replay_buffer.sample(BATCH_SIZE, beta) # CHANGED
 
             s = torch.tensor(s, dtype=torch.float32).to(device)
             s_next = torch.tensor(s_next, dtype=torch.float32).to(device)
             a = torch.tensor(a, dtype=torch.int64).to(device)
             r = torch.tensor(r, dtype=torch.float32).to(device)
             d = torch.tensor(d, dtype=torch.float32).to(device)
+            weights = torch.tensor(weights, dtype=torch.float32).to(device) # NEW
 
             # Check for shape issues or NaNs in input
             if torch.isnan(s_next).any() or s_next.shape != torch.Size([BATCH_SIZE, 4, 84, 84]):
@@ -208,7 +270,9 @@ for episode in range(NUM_EPISODES):
 
                 #loss = nn.MSELoss()(q_values, targets)
                 # changed loss to 
-                loss = nn.SmoothL1Loss()(q_values, targets)
+                td_errors = q_values - targets.detach()
+                loss = (weights * td_errors.pow(2)).mean()  # weighted MSE ADDED
+                # loss = nn.SmoothL1Loss()(q_values, targets)
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(q_net.parameters(), 1.0)
@@ -218,10 +282,14 @@ for episode in range(NUM_EPISODES):
                 for target_param, param in zip(target_net.parameters(), q_net.parameters()):
                     target_param.data.copy_(TAU * param.data + (1.0 - TAU) * target_param.data)
                 losses.append(loss.item())
+                # Update priorities 
+                new_priorities = td_errors.abs().cpu().detach().numpy() + 1e-5
+                replay_buffer.update_priorities(indices, new_priorities)
+
             except Exception as e:
                 print(f" Error during training step: {e}")
                 continue
-
+        
         # ---- TARGET NETWORK UPDATE every TARGET_UPDATE_FREQ steps ----
         if step_count % TARGET_UPDATE_FREQ == 0:
             target_net.load_state_dict(q_net.state_dict())
