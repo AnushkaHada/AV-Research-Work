@@ -9,6 +9,23 @@ from collections import deque
 import cv2
 import time
 
+
+# Hyperparameters
+BATCH_SIZE = 16
+GAMMA = 0.99
+EPSILON_START = 1.0
+EPSILON_END = 0.1
+EPSILON_DECAY = 50000
+REPLAY_SIZE = 50000 # incresed replay size
+LR = 1e-4
+NUM_EPISODES = 2000
+TARGET_UPDATE_FREQ = 1000
+MAX_STEPS_PER_EPISODE = 400
+TRAIN_EVERY = 4
+TIME_LIMIT_PER_EPISODE = 60
+
+
+
 def preprocess(obs):
     gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
     resized = cv2.resize(gray, (84, 84), interpolation=cv2.INTER_AREA)
@@ -88,19 +105,7 @@ class FrameStack:
 
     def _get_stack(self):
         return np.stack(self.frames, axis=0)  # shape (k, 84, 84)
-# Hyperparameters
-BATCH_SIZE = 16
-GAMMA = 0.99
-EPSILON_START = 1.0
-EPSILON_END = 0.1
-EPSILON_DECAY = 50000
-REPLAY_SIZE = 50000 # incresed replay size
-LR = 1e-4
-NUM_EPISODES = 2000
-TARGET_UPDATE_FREQ = 1000
-MAX_STEPS_PER_EPISODE = 400
-TRAIN_EVERY = 4
-TIME_LIMIT_PER_EPISODE = 60
+
 
 # initialize the dqn network and move it to device
 q_net = DQN((4, 84, 84), NUM_ACTIONS).to(device)

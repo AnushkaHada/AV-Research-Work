@@ -1,0 +1,287 @@
+import gymnasium as gym
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import random
+from collections import deque
+import cv2
+import time
+import matplotlib.pyplot as plt
+
+# Hyperparameters
+BATCH_SIZE = 32  # Increased batch size
+GAMMA = 0.99
+EPSILON_START = 1.0
+EPSILON_END = 0.05  # Lower final epsilon
+EPSILON_DECAY = 100000  # Slower decay
+REPLAY_SIZE = 100000  # Larger replay buffer
+LR = 1e-4
+NUM_EPISODES = 2000
+TARGET_UPDATE_FREQ = 1000
+MAX_STEPS_PER_EPISODE = 1000  # Increased max steps
+TRAIN_EVERY = 4
+FRAME_STACK = 4  # Number of frames to stack
+FRAME_SKIP = 2  # Skip frames to reduce redundancy
+MIN_REPLAY_SIZE = 10000  # Minimum samples before training
+TAU = 0.005  # For soft target updates
+
+def preprocess(obs):
+    """Preprocess observation by converting to grayscale and resizing"""
+    gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
+    resized = cv2.resize(gray, (84, 84), interpolation=cv2.INTER_AREA)
+    return resized.astype(np.float32) / 255.0  # Normalize to [0,1]
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Device:", device)
+
+# Environment setup
+env = gym.make("CarRacing-v2", continuous=False)  # Use discrete action space
+ACTIONS = [
+    [0.0, 1.0, 0.0],    # straight
+    [-0.5, 1.0, 0.0],   # slight left
+    [0.5, 1.0, 0.0],    # slight right
+    [-1.0, 1.0, 0.0],   # sharp left
+    [1.0, 1.0, 0.0],    # sharp right
+    [0.0, 0.0, 0.8]     # brake
+]
+NUM_ACTIONS = len(ACTIONS)
+
+class DQN(nn.Module):
+    """Deep Q-Network with CNN architecture"""
+    def __init__(self, obs_shape, num_actions):
+        super().__init__()
+        c, h, w = obs_shape
+        self.net = nn.Sequential(
+            nn.Conv2d(c, 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(64 * 7 * 7, 512),
+            nn.ReLU(),
+            nn.Linear(512, num_actions)
+        
+    def forward(self, x):
+        return self.net(x)
+
+class PrioritizedReplayBuffer:
+    """Prioritized Experience Replay buffer"""
+    def __init__(self, capacity, alpha=0.6):
+        self.capacity = capacity
+        self.buffer = []
+        self.priorities = np.zeros((capacity,), dtype=np.float32)
+        self.pos = 0
+        self.alpha = alpha
+        
+    def push(self, state, action, reward, next_state, done):
+        max_prio = self.priorities.max() if self.buffer else 1.0
+        
+        if len(self.buffer) < self.capacity:
+            self.buffer.append((state, action, reward, next_state, done))
+        else:
+            self.buffer[self.pos] = (state, action, reward, next_state, done)
+        
+        self.priorities[self.pos] = max_prio
+        self.pos = (self.pos + 1) % self.capacity
+    
+    def sample(self, batch_size, beta=0.4):
+        if len(self.buffer) == self.capacity:
+            prios = self.priorities
+        else:
+            prios = self.priorities[:self.pos]
+        
+        probs = prios ** self.alpha
+        probs /= probs.sum()
+        
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
+        samples = [self.buffer[idx] for idx in indices]
+        
+        total = len(self.buffer)
+        weights = (total * probs[indices]) ** (-beta)
+        weights /= weights.max()
+        weights = np.array(weights, dtype=np.float32)
+        
+        batch = list(zip(*samples))
+        states = np.array(batch[0])
+        actions = np.array(batch[1])
+        rewards = np.array(batch[2])
+        next_states = np.array(batch[3])
+        dones = np.array(batch[4])
+        
+        return states, actions, rewards, next_states, dones, indices, weights
+    
+    def update_priorities(self, indices, priorities):
+        for idx, prio in zip(indices, priorities):
+            self.priorities[idx] = prio
+    
+    def __len__(self):
+        return len(self.buffer)
+
+class FrameStack:
+    """Frame stacking for temporal information"""
+    def __init__(self, k):
+        self.k = k
+        self.frames = deque([], maxlen=k)
+    
+    def reset(self, obs):
+        frame = preprocess(obs)
+        for _ in range(self.k):
+            self.frames.append(frame)
+        return self._get_stack()
+    
+    def step(self, obs):
+        frame = preprocess(obs)
+        self.frames.append(frame)
+        return self._get_stack()
+    
+    def _get_stack(self):
+        return np.stack(self.frames, axis=0)  # shape (k, 84, 84)
+
+# Initialize networks
+q_net = DQN((FRAME_STACK, 84, 84), NUM_ACTIONS).to(device)
+target_net = DQN((FRAME_STACK, 84, 84), NUM_ACTIONS).to(device)
+target_net.load_state_dict(q_net.state_dict())
+target_net.eval()
+
+optimizer = optim.Adam(q_net.parameters(), lr=LR, eps=1e-5)
+replay_buffer = PrioritizedReplayBuffer(REPLAY_SIZE)
+
+epsilon = EPSILON_START
+step_count = 0
+episode_rewards = []
+losses = []
+
+frame_stack = FrameStack(FRAME_STACK)
+
+# Training loop
+for episode in range(NUM_EPISODES):
+    try:
+        obs, _ = env.reset()
+    except Exception as e:
+        print("Reset failed:", e)
+        continue
+    
+    state_np = frame_stack.reset(obs)
+    episode_reward = 0
+    done = False
+    negative_rewards = 0
+    episode_start_time = time.time()
+    
+    for step in range(MAX_STEPS_PER_EPISODE):
+        # Epsilon-greedy action selection
+        if random.random() < epsilon:
+            action_idx = random.randrange(NUM_ACTIONS)
+        else:
+            with torch.no_grad():
+                state_tensor = torch.tensor(state_np, dtype=torch.float32).unsqueeze(0).to(device)
+                q_values = q_net(state_tensor)
+                action_idx = q_values.argmax().item()
+        
+        # Execute action with frame skipping
+        total_reward = 0
+        for _ in range(FRAME_SKIP):
+            next_obs, reward, terminated, truncated, _ = env.step(ACTIONS[action_idx])
+            total_reward += reward
+            if terminated or truncated:
+                break
+        
+        # Track negative rewards for early termination
+        if total_reward < 0:
+            negative_rewards += 1
+        
+        done = terminated or truncated
+        reward = total_reward
+        
+        # Clip rewards to [-1, 1] to stabilize training
+        reward = np.clip(reward, -1, 1)
+        
+        # Store transition in replay buffer
+        next_state_np = frame_stack.step(next_obs)
+        replay_buffer.push(state_np.copy(), action_idx, reward, next_state_np.copy(), done)
+        
+        state_np = next_state_np
+        episode_reward += reward
+        step_count += 1
+        
+        # Decay epsilon
+        epsilon = max(EPSILON_END, EPSILON_START - (EPSILON_START - EPSILON_END) * (step_count / EPSILON_DECAY))
+        
+        # Early termination conditions
+        if episode_reward < -5 or negative_rewards > 25 or (time.time() - episode_start_time) > 60:
+            done = True
+        
+        # Training
+        if len(replay_buffer) > MIN_REPLAY_SIZE and step_count % TRAIN_EVERY == 0:
+            states, actions, rewards, next_states, dones, indices, weights = replay_buffer.sample(BATCH_SIZE)
+            
+            states = torch.tensor(states, dtype=torch.float32).to(device)
+            next_states = torch.tensor(next_states, dtype=torch.float32).to(device)
+            actions = torch.tensor(actions, dtype=torch.int64).to(device)
+            rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
+            dones = torch.tensor(dones, dtype=torch.float32).to(device)
+            weights = torch.tensor(weights, dtype=torch.float32).to(device)
+            
+            # Double DQN
+            with torch.no_grad():
+                next_actions = q_net(next_states).argmax(1)
+                next_q_values = target_net(next_states).gather(1, next_actions.unsqueeze(1)).squeeze()
+                targets = rewards + GAMMA * next_q_values * (1 - dones)
+            
+            current_q_values = q_net(states).gather(1, actions.unsqueeze(1)).squeeze()
+            
+            # Compute loss with importance sampling weights
+            loss = (weights * (current_q_values - targets).pow(2)).mean()
+            
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(q_net.parameters(), 10.0)
+            optimizer.step()
+            
+            # Update priorities
+            with torch.no_grad():
+                errors = torch.abs(current_q_values - targets).cpu().numpy()
+                replay_buffer.update_priorities(indices, errors + 1e-5)  # Small offset
+            
+            losses.append(loss.item())
+        
+        # Soft target network update
+        for target_param, param in zip(target_net.parameters(), q_net.parameters()):
+            target_param.data.copy_(TAU * param.data + (1.0 - TAU) * target_param.data)
+        
+        if done:
+            break
+    
+    episode_rewards.append(episode_reward)
+    
+    # Logging
+    if episode % 10 == 0:
+        avg_reward = np.mean(episode_rewards[-10:])
+        avg_loss = np.mean(losses[-100:]) if losses else 0
+        print(f"Episode {episode} - Reward: {episode_reward:.2f} - Avg Reward (10): {avg_reward:.2f} - "
+              f"Epsilon: {epsilon:.3f} - Avg Loss: {avg_loss:.4f}")
+    
+    # Save model periodically
+    if episode % 100 == 0 and episode > 0:
+        torch.save(q_net.state_dict(), f"dqn_model_ep{episode}.pth")
+
+# Save final model
+torch.save(q_net.state_dict(), "dqn_model_final.pth")
+env.close()
+
+# Plot results
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+plt.plot(episode_rewards)
+plt.title("Episode Rewards")
+plt.xlabel("Episode")
+plt.ylabel("Reward")
+
+plt.subplot(1, 2, 2)
+plt.plot(losses)
+plt.title("Training Loss")
+plt.xlabel("Step")
+plt.ylabel("Loss")
+plt.show()
