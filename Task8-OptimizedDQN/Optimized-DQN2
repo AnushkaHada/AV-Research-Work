@@ -9,19 +9,20 @@ import cv2
 import time
 
 # Hyperparameters
-BATCH_SIZE = 16
+BATCH_SIZE = 32
 GAMMA = 0.99
 EPSILON_START = 1.0
-EPSILON_END = 0.1
-EPSILON_DECAY = 100000  # Slower decay for more early exploration
-REPLAY_SIZE = 50000
+EPSILON_END = 0.05
+EPSILON_DECAY = 250000  # slower decay
+REPLAY_SIZE = 100000
 LR = 1e-4
 NUM_EPISODES = 2000
 TARGET_UPDATE_FREQ = 1000
-MAX_STEPS_PER_EPISODE = 400
+MAX_STEPS_PER_EPISODE = 1000  # longer episode
 TRAIN_EVERY = 4
-TIME_LIMIT_PER_EPISODE = 60
-TAU = 0.005  # For soft target updates
+TIME_LIMIT_PER_EPISODE = 120
+TAU = 0.005  # soft target update
+ACTION_REPEAT = 4  # repeat each action for 4 frames
 
 def preprocess(obs):
     gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
@@ -33,14 +34,17 @@ print("Device:", device)
 
 env = gym.make("CarRacing-v2", continuous=True, render_mode="rgb_array")
 
-# More granular discrete actions
+# Expanded discrete actions with finer granularity and coasting/brake
 ACTIONS = [
-    [0.0, 1.0, 0.0],     # straight
-    [-0.25, 1.0, 0.0],   # slight left
-    [0.25, 1.0, 0.0],    # slight right
-    [-0.5, 1.0, 0.0],    # medium left
-    [0.5, 1.0, 0.0],     # medium right
-    [0.0, 0.0, 0.8]      # brake
+    [0.0, 1.0, 0.0],     # straight full gas
+    [-0.1, 1.0, 0.0],    # slight left gas
+    [0.1, 1.0, 0.0],     # slight right gas
+    [-0.25, 0.7, 0.0],   # medium left less gas
+    [0.25, 0.7, 0.0],    # medium right less gas
+    [0.0, 0.5, 0.0],     # straight half gas
+    [0.0, 0.0, 0.8],     # brake
+    [-0.1, 0.0, 0.8],    # left brake
+    [0.1, 0.0, 0.8],     # right brake
 ]
 NUM_ACTIONS = len(ACTIONS)
 
@@ -106,23 +110,33 @@ target_net.eval()
 optimizer = optim.Adam(q_net.parameters(), lr=LR)
 replay_buffer = ReplayBuffer(REPLAY_SIZE)
 
-# Warm-up buffer
+# Warm-up replay buffer with random actions
 print("Warming up replay buffer...")
 frame_stack = FrameStack(k=4)
 obs, _ = env.reset()
 state_np = frame_stack.reset(obs)
 state = torch.tensor(state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
-while len(replay_buffer) < 1000:
+
+while len(replay_buffer) < 5000:  # warm up more for stability
     action_idx = random.randrange(NUM_ACTIONS)
     action = ACTIONS[action_idx]
-    next_obs, reward, terminated, truncated, _ = env.step(action)
-    done = terminated or truncated
+
+    total_reward = 0
+    done = False
+    for _ in range(ACTION_REPEAT):
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+        total_reward += reward
+        if done:
+            break
+
     next_state_np = frame_stack.step(next_obs)
     next_state = torch.tensor(next_state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
+
     replay_buffer.push(
         state.squeeze(0).cpu().numpy(),
         action_idx,
-        reward,
+        total_reward,
         next_state.squeeze(0).cpu().numpy(),
         done
     )
@@ -133,7 +147,6 @@ epsilon = EPSILON_START
 step_count = 0
 
 episode_rewards = []
-epsilons = []
 losses = []
 
 for episode in range(NUM_EPISODES):
@@ -144,12 +157,13 @@ for episode in range(NUM_EPISODES):
     done = False
     step = 0
     episode_start_time = time.time()
-    neg_reward_count = 0
 
     while not done and step < MAX_STEPS_PER_EPISODE:
         step += 1
         step_count += 1
-        epsilon = EPSILON_END + (EPSILON_START - EPSILON_END) * np.exp(-1.0 * step_count / EPSILON_DECAY)
+
+        # Linear epsilon decay with minimum epsilon floor
+        epsilon = max(EPSILON_END, EPSILON_START - step_count / EPSILON_DECAY)
 
         if random.random() < epsilon:
             action_idx = random.randrange(NUM_ACTIONS)
@@ -159,12 +173,19 @@ for episode in range(NUM_EPISODES):
                 action_idx = q_values.argmax().item()
 
         action = ACTIONS[action_idx]
-        next_obs, reward, terminated, truncated, _ = env.step(action)
-        done = terminated or truncated
 
-        # Reward shaping
-        reward += action[1] * 0.3  # bonus for gas
-        reward -= abs(action[0]) * 0.1  # penalty for turning
+        # Repeat action multiple frames for smoother control
+        total_reward = 0
+        for _ in range(ACTION_REPEAT):
+            next_obs, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            # Reward shaping
+            reward += action[1] * 0.3  # encourage gas
+            reward -= abs(action[0]) * 0.15  # penalize sharp steering
+            reward -= action[2] * 0.3  # penalize braking
+            total_reward += reward
+            if done:
+                break
 
         next_state_np = frame_stack.step(next_obs)
         next_state = torch.tensor(next_state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
@@ -172,20 +193,15 @@ for episode in range(NUM_EPISODES):
         replay_buffer.push(
             state.squeeze(0).cpu().numpy(),
             action_idx,
-            reward,
+            total_reward,
             next_state.squeeze(0).cpu().numpy(),
             done
         )
 
         state = next_state
-        episode_reward += reward
+        episode_reward += total_reward
 
-        if reward < 0:
-            neg_reward_count += 1
-        if neg_reward_count > 50:
-            print("Too many negative rewards, breaking.")
-            break
-
+        # Train every TRAIN_EVERY steps if enough samples
         if step_count % TRAIN_EVERY == 0 and len(replay_buffer) > BATCH_SIZE:
             s, a, r, s_next, d = replay_buffer.sample(BATCH_SIZE)
 
@@ -220,7 +236,6 @@ for episode in range(NUM_EPISODES):
             break
 
     episode_rewards.append(episode_reward)
-    epsilons.append(epsilon)
     print(f"Episode {episode} - Reward: {episode_reward:.2f} - Epsilon: {epsilon:.3f}")
 
     if episode % 10 == 0 and episode > 0:
