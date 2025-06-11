@@ -1,4 +1,4 @@
-# Task 7: Implement DQN from scratch using gymnasium Car Racing environment. 
+# Task 7: Implement DQN from scratch using gymnasium Car Racing environment. Add commentMore actions
 import gymnasium as gym
 import torch
 import torch.nn as nn
@@ -23,20 +23,14 @@ env = gym.make("CarRacing-v2", continuous = True, render_mode="rgb_array")
 
 # Since DQN is used for discrete action spaces instead of continouse:
 # Define discrete actions
-# Added more actions
 ACTIONS = [
-    [0.0, 1.0, 0.0],      # full throttle straight
-    [0.0, 0.5, 0.0],      # half throttle straight
-    [0.0, 0.0, 0.8],      # brake
-    [-0.25, 1.0, 0.0],    # slight left full throttle
-    [0.25, 1.0, 0.0],     # slight right full throttle
-    [-0.5, 0.5, 0.0],     # more left half throttle
-    [0.5, 0.5, 0.0],      # more right half throttle
-    [-1.0, 0.5, 0.0],     # sharp left half throttle
-    [1.0, 0.5, 0.0],      # sharp right half throttle
+    [0.0, 1.0, 0.0],    # straight
+    [-0.5, 1.0, 0.0],   # slight left
+    [0.5, 1.0, 0.0],    # slight right
+    [-1.0, 1.0, 0.0],   # sharp left
+    [1.0, 1.0, 0.0],    # sharp right
+    [0.0, 0.0, 0.8]     # brake
 ]
-ACTIONS.append([0.0, 0.0, 0.0])  # do nothing (coast)
-
 NUM_ACTIONS = len(ACTIONS)
 
 
@@ -94,20 +88,18 @@ class FrameStack:
 
     def _get_stack(self):
         return np.stack(self.frames, axis=0)  # shape (k, 84, 84)
-
-
 # Hyperparameters
 BATCH_SIZE = 16
 GAMMA = 0.99
 EPSILON_START = 1.0
 EPSILON_END = 0.1
-EPSILON_DECAY = 200000 # Increased
-REPLAY_SIZE = 100000 # Increased replay size
-LR = 1e-5
+EPSILON_DECAY = 50000
+REPLAY_SIZE = 50000 # incresed replay size
+LR = 1e-4
 NUM_EPISODES = 2000
 TARGET_UPDATE_FREQ = 1000
-MAX_STEPS_PER_EPISODE = 2000 # increa
-TRAIN_EVERY = 2 # changed 
+MAX_STEPS_PER_EPISODE = 400
+TRAIN_EVERY = 4
 TIME_LIMIT_PER_EPISODE = 60
 
 # initialize the dqn network and move it to device
@@ -170,7 +162,7 @@ for episode in range(NUM_EPISODES):
 
         # Clip reward 
         #reward = np.clip(reward, -1, 1) caused more negative rewards
-        
+
         next_state_np = frame_stack.step(next_obs)
         next_state = torch.tensor(next_state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
 
@@ -251,8 +243,6 @@ for episode in range(NUM_EPISODES):
     
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-
+    frame_stack.reset(obs)
 
 env.close()
-
-
