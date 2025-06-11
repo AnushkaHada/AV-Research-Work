@@ -1,209 +1,237 @@
+import gymnasium as gym
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import numpy as np
-import gymnasium as gym
-from torch.utils.tensorboard import SummaryWriter
+import random
+from collections import deque
+import cv2
+import time
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
+# Hyperparameters
+BATCH_SIZE = 16
+GAMMA = 0.99
+EPSILON_START = 1.0
+EPSILON_END = 0.1
+EPSILON_DECAY = 100000  # Slower decay for more early exploration
+REPLAY_SIZE = 50000
+LR = 1e-4
+NUM_EPISODES = 2000
+TARGET_UPDATE_FREQ = 1000
+MAX_STEPS_PER_EPISODE = 400
+TRAIN_EVERY = 4
+TIME_LIMIT_PER_EPISODE = 60
+TAU = 0.005  # For soft target updates
 
 def preprocess(obs):
-    return obs.transpose(2, 0, 1).astype(np.float32) / 255.0  # (3, 96, 96)
+    gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
+    resized = cv2.resize(gray, (84, 84), interpolation=cv2.INTER_AREA)
+    return resized.astype(np.uint8)
 
-env = gym.make("CarRacing-v2", continuous=True)
-writer = SummaryWriter(log_dir="runs/ppo_carracing_cnn")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Device:", device)
 
-class ActorCritic(nn.Module):
-    def __init__(self, action_dim):
+env = gym.make("CarRacing-v2", continuous=True, render_mode="rgb_array")
+
+# More granular discrete actions
+ACTIONS = [
+    [0.0, 1.0, 0.0],     # straight
+    [-0.25, 1.0, 0.0],   # slight left
+    [0.25, 1.0, 0.0],    # slight right
+    [-0.5, 1.0, 0.0],    # medium left
+    [0.5, 1.0, 0.0],     # medium right
+    [0.0, 0.0, 0.8]      # brake
+]
+NUM_ACTIONS = len(ACTIONS)
+
+class DQN(nn.Module):
+    def __init__(self, obs_shape, num_actions):
         super().__init__()
-        self.cnn = nn.Sequential(
-            nn.Conv2d(3, 32, 8, stride=4),
+        c, h, w = obs_shape
+        self.net = nn.Sequential(
+            nn.Conv2d(c, 32, 8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, 4, stride=2),
             nn.ReLU(),
             nn.Conv2d(64, 64, 3, stride=1),
             nn.ReLU(),
-            nn.Flatten()
-        )
-        self.linear = nn.Sequential(
-            nn.Linear(64 * 7 * 7, 256),
-            nn.ReLU()
-        )
-        self.actor_mean = nn.Sequential(
-            nn.Linear(256, 256),
+            nn.Flatten(),
+            nn.Linear(64 * 7 * 7, 512),
             nn.ReLU(),
-            nn.Linear(256, action_dim),
-            nn.Tanh()
-        )
-        self.log_std = nn.Parameter(torch.ones(action_dim) * -0.5)
-        self.critic = nn.Sequential(
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1)
+            nn.Linear(512, num_actions)
         )
 
-    def forward(self, obs):
-        x = self.cnn(obs)
-        x = self.linear(x)
-        mean = self.actor_mean(x)
-        std = self.log_std.exp().expand_as(mean)
-        value = self.critic(x)
-        return mean, std, value
+    def forward(self, x):
+        return self.net(x)
 
-    def act(self, obs):
-        with torch.no_grad():
-            obs = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-            mean, std, value = self.forward(obs)
-            dist = torch.distributions.Normal(mean, std)
-            action = dist.sample()
-            # Clip each action component appropriately
-            action[0, 0] = torch.clamp(action[0, 0], -1, 1)  # steering
-            action[0, 1] = torch.clamp(action[0, 1], 0, 1)   # gas
-            action[0, 2] = torch.clamp(action[0, 2], 0, 1)   # brake
-            log_prob = dist.log_prob(action).sum(dim=-1)
-            return action.squeeze().cpu().numpy(), value.item(), log_prob.item()
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
 
-class PPOAgent:
-    def __init__(self, env, policy, optimizer, gamma=0.99, lam=0.95, eps_clip=0.2):
-        self.env = env
-        self.policy = policy
-        self.optimizer = optimizer
-        self.gamma = gamma
-        self.lam = lam
-        self.eps_clip = eps_clip
+    def push(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
 
-    def compute_returns(self, rewards, values, dones):
-        returns = []
-        gae = 0
-        next_value = 0
-        for step in reversed(range(len(rewards))):
-            delta = rewards[step] + self.gamma * next_value * (1 - dones[step]) - values[step]
-            gae = delta + self.gamma * self.lam * (1 - dones[step]) * gae
-            next_value = values[step]
-            returns.insert(0, gae + values[step])
-        return returns
+    def sample(self, batch_size):
+        batch = random.sample(self.buffer, batch_size)
+        state, action, reward, next_state, done = map(np.array, zip(*batch))
+        return state, action, reward, next_state, done
 
-    def update(self, batch, epochs=4, batch_size=64):
-        obs_tensor = torch.tensor(np.array(batch['obs']), dtype=torch.float32, device=device)
-        action_tensor = torch.tensor(np.array(batch['actions']), dtype=torch.float32, device=device)
-        return_tensor = torch.tensor(np.array(batch['returns']), dtype=torch.float32, device=device)
-        old_log_probs_tensor = torch.tensor(batch['log_probs'], dtype=torch.float32, device=device)
-        value_tensor = torch.tensor(batch['values'], dtype=torch.float32, device=device)
+    def __len__(self):
+        return len(self.buffer)
 
-        advantage = return_tensor - value_tensor
-        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+class FrameStack:
+    def __init__(self, k):
+        self.k = k
+        self.frames = deque([], maxlen=k)
 
-        dataset_size = len(batch['obs'])
-        losses = {'actor': 0, 'critic': 0, 'entropy': 0, 'total': 0}
-        count = 0
+    def reset(self, obs):
+        frame = preprocess(obs)
+        for _ in range(self.k):
+            self.frames.append(frame)
+        return self._get_stack()
 
-        for _ in range(epochs):
-            indices = np.arange(dataset_size)
-            np.random.shuffle(indices)
+    def step(self, obs):
+        frame = preprocess(obs)
+        self.frames.append(frame)
+        return self._get_stack()
 
-            for start in range(0, dataset_size, batch_size):
-                end = start + batch_size
-                mb_idx = indices[start:end]
+    def _get_stack(self):
+        return np.stack(self.frames, axis=0)
 
-                mb_obs = obs_tensor[mb_idx]
-                mb_actions = action_tensor[mb_idx]
-                mb_returns = return_tensor[mb_idx]
-                mb_old_log_probs = old_log_probs_tensor[mb_idx]
-                mb_advantage = advantage[mb_idx]
+q_net = DQN((4, 84, 84), NUM_ACTIONS).to(device)
+target_net = DQN((4, 84, 84), NUM_ACTIONS).to(device)
+target_net.load_state_dict(q_net.state_dict())
+target_net.eval()
 
-                mean_pred, std_pred, value_pred = self.policy(mb_obs)
-                value_pred = value_pred.squeeze()
-                dist = torch.distributions.Normal(mean_pred, std_pred)
-                log_probs = dist.log_prob(mb_actions).sum(dim=1)
-                entropy = dist.entropy().sum(dim=1).mean()
+optimizer = optim.Adam(q_net.parameters(), lr=LR)
+replay_buffer = ReplayBuffer(REPLAY_SIZE)
 
-                ratio = torch.exp(log_probs - mb_old_log_probs)
-                clip_adv = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantage
-                loss_actor = -torch.min(ratio * mb_advantage, clip_adv).mean()
-                loss_critic = (mb_returns - value_pred).pow(2).mean()
-                loss = loss_actor + 0.5 * loss_critic - 0.01 * entropy
-
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-
-                losses['actor'] += loss_actor.item()
-                losses['critic'] += loss_critic.item()
-                losses['entropy'] += entropy.item()
-                losses['total'] += loss.item()
-                count += 1
-
-        for key in losses:
-            losses[key] /= count
-        return losses
-
-# Initialize agent
-action_dim = env.action_space.shape[0]
-policy = ActorCritic(action_dim).to(device)
-optimizer = torch.optim.Adam(policy.parameters(), lr=3e-4)
-agent = PPOAgent(env, policy, optimizer)
-
-n_episodes = 1000
-batch_size = 8192
-mini_batch_size = 64
-update_epochs = 10
-all_episode_rewards = []
-batch = {k: [] for k in ['obs', 'actions', 'rewards', 'values', 'dones', 'log_probs']}
-steps_collected = 0
-
+# Warm-up buffer
+print("Warming up replay buffer...")
+frame_stack = FrameStack(k=4)
 obs, _ = env.reset()
-obs = preprocess(obs)
-done = False
+state_np = frame_stack.reset(obs)
+state = torch.tensor(state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
+while len(replay_buffer) < 1000:
+    action_idx = random.randrange(NUM_ACTIONS)
+    action = ACTIONS[action_idx]
+    next_obs, reward, terminated, truncated, _ = env.step(action)
+    done = terminated or truncated
+    next_state_np = frame_stack.step(next_obs)
+    next_state = torch.tensor(next_state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
+    replay_buffer.push(
+        state.squeeze(0).cpu().numpy(),
+        action_idx,
+        reward,
+        next_state.squeeze(0).cpu().numpy(),
+        done
+    )
+    state = next_state if not done else torch.tensor(
+        frame_stack.reset(env.reset()[0]), dtype=torch.float32).unsqueeze(0).to(device) / 255.0
 
-for episode in range(n_episodes):
+epsilon = EPSILON_START
+step_count = 0
+
+episode_rewards = []
+epsilons = []
+losses = []
+
+for episode in range(NUM_EPISODES):
+    obs, _ = env.reset()
+    state_np = frame_stack.reset(obs)
+    state = torch.tensor(state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
     episode_reward = 0
-    while True:
-        action, value, log_prob = agent.policy.act(obs)
+    done = False
+    step = 0
+    episode_start_time = time.time()
+    neg_reward_count = 0
+
+    while not done and step < MAX_STEPS_PER_EPISODE:
+        step += 1
+        step_count += 1
+        epsilon = EPSILON_END + (EPSILON_START - EPSILON_END) * np.exp(-1.0 * step_count / EPSILON_DECAY)
+
+        if random.random() < epsilon:
+            action_idx = random.randrange(NUM_ACTIONS)
+        else:
+            with torch.no_grad():
+                q_values = q_net(state)
+                action_idx = q_values.argmax().item()
+
+        action = ACTIONS[action_idx]
         next_obs, reward, terminated, truncated, _ = env.step(action)
-        next_obs = preprocess(next_obs)
-
-        # Reward shaping
-        reward += action[1] * 0.3      # Encourage acceleration
-        reward -= abs(action[0]) * 0.05  # Penalize erratic steering
-
         done = terminated or truncated
 
-        batch['obs'].append(obs)
-        batch['actions'].append(action)
-        batch['rewards'].append(reward)
-        batch['values'].append(value)
-        batch['dones'].append(done)
-        batch['log_probs'].append(log_prob)
+        # Reward shaping
+        reward += action[1] * 0.3  # bonus for gas
+        reward -= abs(action[0]) * 0.1  # penalty for turning
 
+        next_state_np = frame_stack.step(next_obs)
+        next_state = torch.tensor(next_state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
+
+        replay_buffer.push(
+            state.squeeze(0).cpu().numpy(),
+            action_idx,
+            reward,
+            next_state.squeeze(0).cpu().numpy(),
+            done
+        )
+
+        state = next_state
         episode_reward += reward
-        steps_collected += 1
-        obs = next_obs
 
-        if done:
-            obs, _ = env.reset()
-            obs = preprocess(obs)
-            all_episode_rewards.append(episode_reward)
-            print(f"Episode {episode} reward: {episode_reward:.2f}")
-            writer.add_scalar("Reward/Episode", episode_reward, episode)
-            if episode >= 9:
-                mean_10 = np.mean(all_episode_rewards[-10:])
-                writer.add_scalar("Reward/Mean_Last_10", mean_10, episode)
+        if reward < 0:
+            neg_reward_count += 1
+        if neg_reward_count > 50:
+            print("Too many negative rewards, breaking.")
             break
 
-        if steps_collected >= batch_size:
-            returns = agent.compute_returns(batch['rewards'], batch['values'], batch['dones'])
-            batch['returns'] = returns
-            losses = agent.update(batch, epochs=update_epochs, batch_size=mini_batch_size)
+        if step_count % TRAIN_EVERY == 0 and len(replay_buffer) > BATCH_SIZE:
+            s, a, r, s_next, d = replay_buffer.sample(BATCH_SIZE)
 
-            writer.add_scalar("Loss/Actor", losses['actor'], episode)
-            writer.add_scalar("Loss/Critic", losses['critic'], episode)
-            writer.add_scalar("Loss/Entropy", losses['entropy'], episode)
-            writer.add_scalar("Loss/Total", losses['total'], episode)
+            s = torch.tensor(s, dtype=torch.float32).to(device)
+            s_next = torch.tensor(s_next, dtype=torch.float32).to(device)
+            a = torch.tensor(a, dtype=torch.int64).to(device)
+            r = torch.tensor(r, dtype=torch.float32).to(device)
+            d = torch.tensor(d, dtype=torch.float32).to(device)
 
-            batch = {k: [] for k in batch}
-            steps_collected = 0
+            q_values = q_net(s).gather(1, a.unsqueeze(1)).squeeze()
+            with torch.no_grad():
+                best_actions = q_net(s_next).argmax(1).unsqueeze(1)
+                next_q_values = target_net(s_next).gather(1, best_actions).squeeze()
+                targets = r + GAMMA * next_q_values * (1 - d)
 
-    if episode % 10 == 0:
-        print(f"Episode {episode}: Mean reward last 10 episodes = {np.mean(all_episode_rewards[-10:]):.2f}")
+            loss = nn.SmoothL1Loss()(q_values, targets)
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(q_net.parameters(), 1.0)
+            optimizer.step()
+            losses.append(loss.item())
 
-writer.close()
+            # Soft update
+            for target_param, param in zip(target_net.parameters(), q_net.parameters()):
+                target_param.data.copy_(TAU * param.data + (1.0 - TAU) * target_param.data)
+
+        if step_count % TARGET_UPDATE_FREQ == 0:
+            target_net.load_state_dict(q_net.state_dict())
+
+        if time.time() - episode_start_time > TIME_LIMIT_PER_EPISODE:
+            print("Episode time limit exceeded.")
+            break
+
+    episode_rewards.append(episode_reward)
+    epsilons.append(epsilon)
+    print(f"Episode {episode} - Reward: {episode_reward:.2f} - Epsilon: {epsilon:.3f}")
+
+    if episode % 10 == 0 and episode > 0:
+        torch.save(q_net.state_dict(), f"checkpoint_episode_{episode}.pt")
+        avg_reward = np.mean(episode_rewards[-10:])
+        avg_loss = np.mean(losses[-100:]) if losses else 0
+        print(f"[Episode {episode}] Avg Reward (last 10): {avg_reward:.2f}")
+        print(f"[Episode {episode}] Avg Loss (last 100): {avg_loss:.5f}")
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    frame_stack.reset(obs)
+
+env.close()
