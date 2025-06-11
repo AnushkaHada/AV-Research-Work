@@ -144,6 +144,7 @@ for episode in range(NUM_EPISODES):
     step = 0 
     episode_start_time = time.time()
 
+    neg_reward_count = 0
     while not done and step < MAX_STEPS_PER_EPISODE:
         step += 1  
         # while episode is not finished. 
@@ -185,6 +186,12 @@ for episode in range(NUM_EPISODES):
         
         state = next_state
         episode_reward += reward  # add the rewards together. 
+        if reward < 0:
+            neg_reward_count += 1
+
+        if step > 300 and neg_reward_count > 25:
+            print("Too many negative rewards, terminating early")
+            break
 
         # ---- TRAINING every TRAIN_EVERY steps ----
         if step_count % TRAIN_EVERY == 0 and len(replay_buffer) > BATCH_SIZE:
@@ -241,6 +248,7 @@ for episode in range(NUM_EPISODES):
     print(f"Episode {episode} - Reward: {episode_reward:.2f} - Epsilon: {epsilon:.3f}")
     
     if episode % 10 == 0 and episode > 0:
+        torch.save(q_net.state_dict(), f"checkpoint_episode_{episode}.pt")
         avg_reward = np.mean(episode_rewards[-10:])
         avg_loss = np.mean(losses[-100:]) if losses else 0
         print(f"[Episode {episode}] Avg Reward (last 10): {avg_reward:.2f}")
