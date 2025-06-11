@@ -189,7 +189,7 @@ for episode in range(NUM_EPISODES):
         if reward < 0:
             neg_reward_count += 1
 
-        if step > 300 and neg_reward_count > 25:
+        if step > 300 and neg_reward_count > 50:
             print("Too many negative rewards, terminating early")
             break
 
