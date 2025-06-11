@@ -10,42 +10,34 @@ import time
 import matplotlib.pyplot as plt
 
 # Hyperparameters
-BATCH_SIZE = 32  # Increased batch size
+BATCH_SIZE = 32
 GAMMA = 0.99
 EPSILON_START = 1.0
-EPSILON_END = 0.05  # Lower final epsilon
-EPSILON_DECAY = 100000  # Slower decay
-REPLAY_SIZE = 100000  # Larger replay buffer
+EPSILON_END = 0.05
+EPSILON_DECAY = 100000
+REPLAY_SIZE = 100000
 LR = 1e-4
 NUM_EPISODES = 2000
 TARGET_UPDATE_FREQ = 1000
-MAX_STEPS_PER_EPISODE = 1000  # Increased max steps
+MAX_STEPS_PER_EPISODE = 1000
 TRAIN_EVERY = 4
-FRAME_STACK = 4  # Number of frames to stack
-FRAME_SKIP = 2  # Skip frames to reduce redundancy
-MIN_REPLAY_SIZE = 10000  # Minimum samples before training
-TAU = 0.005  # For soft target updates
+FRAME_STACK = 4
+FRAME_SKIP = 2
+MIN_REPLAY_SIZE = 10000
+TAU = 0.005
 
 def preprocess(obs):
     """Preprocess observation by converting to grayscale and resizing"""
     gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
     resized = cv2.resize(gray, (84, 84), interpolation=cv2.INTER_AREA)
-    return resized.astype(np.float32) / 255.0  # Normalize to [0,1]
+    return resized.astype(np.float32) / 255.0
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Device:", device)
 
-# Environment setup
-env = gym.make("CarRacing-v2", continuous=False)  # Use discrete action space
-ACTIONS = [
-    [0.0, 1.0, 0.0],    # straight
-    [-0.5, 1.0, 0.0],   # slight left
-    [0.5, 1.0, 0.0],    # slight right
-    [-1.0, 1.0, 0.0],   # sharp left
-    [1.0, 1.0, 0.0],    # sharp right
-    [0.0, 0.0, 0.8]     # brake
-]
-NUM_ACTIONS = len(ACTIONS)
+# Environment setup - Use discrete action space
+env = gym.make("CarRacing-v2", continuous=False)
+NUM_ACTIONS = env.action_space.n  # Get the number of discrete actions (5)
 
 class DQN(nn.Module):
     """Deep Q-Network with CNN architecture"""
@@ -63,7 +55,6 @@ class DQN(nn.Module):
             nn.Linear(64 * 7 * 7, 512),
             nn.ReLU(),
             nn.Linear(512, num_actions)
-        )
         
     def forward(self, x):
         return self.net(x)
@@ -139,7 +130,7 @@ class FrameStack:
         return self._get_stack()
     
     def _get_stack(self):
-        return np.stack(self.frames, axis=0)  # shape (k, 84, 84)
+        return np.stack(self.frames, axis=0)
 
 # Initialize networks
 q_net = DQN((FRAME_STACK, 84, 84), NUM_ACTIONS).to(device)
@@ -157,7 +148,6 @@ losses = []
 
 frame_stack = FrameStack(FRAME_STACK)
 
-# Training loop
 for episode in range(NUM_EPISODES):
     try:
         obs, _ = env.reset()
@@ -174,34 +164,33 @@ for episode in range(NUM_EPISODES):
     for step in range(MAX_STEPS_PER_EPISODE):
         # Epsilon-greedy action selection
         if random.random() < epsilon:
-            action_idx = random.randrange(NUM_ACTIONS)
+            action = env.action_space.sample()  # Sample from discrete action space
         else:
             with torch.no_grad():
                 state_tensor = torch.tensor(state_np, dtype=torch.float32).unsqueeze(0).to(device)
                 q_values = q_net(state_tensor)
-                action_idx = q_values.argmax().item()
+                action = q_values.argmax().item()
         
         # Execute action with frame skipping
         total_reward = 0
         for _ in range(FRAME_SKIP):
-            next_obs, reward, terminated, truncated, _ = env.step(ACTIONS[action_idx])
+            next_obs, reward, terminated, truncated, _ = env.step(action)
             total_reward += reward
             if terminated or truncated:
                 break
         
-        # Track negative rewards for early termination
         if total_reward < 0:
             negative_rewards += 1
         
         done = terminated or truncated
         reward = total_reward
         
-        # Clip rewards to [-1, 1] to stabilize training
+        # Clip rewards to [-1, 1]
         reward = np.clip(reward, -1, 1)
         
         # Store transition in replay buffer
         next_state_np = frame_stack.step(next_obs)
-        replay_buffer.push(state_np.copy(), action_idx, reward, next_state_np.copy(), done)
+        replay_buffer.push(state_np.copy(), action, reward, next_state_np.copy(), done)
         
         state_np = next_state_np
         episode_reward += reward
@@ -244,7 +233,7 @@ for episode in range(NUM_EPISODES):
             # Update priorities
             with torch.no_grad():
                 errors = torch.abs(current_q_values - targets).cpu().numpy()
-                replay_buffer.update_priorities(indices, errors + 1e-5)  # Small offset
+                replay_buffer.update_priorities(indices, errors + 1e-5)
             
             losses.append(loss.item())
         
