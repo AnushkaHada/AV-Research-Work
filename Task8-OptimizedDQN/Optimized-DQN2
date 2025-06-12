@@ -9,7 +9,7 @@ import cv2
 import time
 
 # Hyperparameters
-BATCH_SIZE = 32
+BATCH_SIZE = 16
 GAMMA = 0.99
 EPSILON_START = 1.0
 EPSILON_END = 0.05
