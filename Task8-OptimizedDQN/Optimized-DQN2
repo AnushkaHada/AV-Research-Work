@@ -67,7 +67,7 @@ NUM_ACTIONS = len(ACTIONS)
 
     def forward(self, x):
         return self.net(x)"""
-class DuelingDQN(nn.Module):
+class DQN(nn.Module):
     def __init__(self, obs_shape, num_actions):
         super().__init__()
         c, h, w = obs_shape
