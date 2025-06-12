@@ -48,7 +48,7 @@ ACTIONS = [
 ]
 NUM_ACTIONS = len(ACTIONS)
 
-class DQN(nn.Module):
+"""class DQN(nn.Module):
     def __init__(self, obs_shape, num_actions):
         super().__init__()
         c, h, w = obs_shape
@@ -66,7 +66,36 @@ class DQN(nn.Module):
         )
 
     def forward(self, x):
-        return self.net(x)
+        return self.net(x)"""
+class DuelingDQN(nn.Module):
+    def __init__(self, obs_shape, num_actions):
+        super().__init__()
+        c, h, w = obs_shape
+        self.features = nn.Sequential(
+            nn.Conv2d(c, 32, 8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, stride=1),
+            nn.ReLU(),
+            nn.Flatten()
+        )
+        self.fc_value = nn.Sequential(
+            nn.Linear(64 * 7 * 7, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1)
+        )
+        self.fc_advantage = nn.Sequential(
+            nn.Linear(64 * 7 * 7, 512),
+            nn.ReLU(),
+            nn.Linear(512, num_actions)
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        value = self.fc_value(x)
+        advantage = self.fc_advantage(x)
+        return value + (advantage - advantage.mean())
 
 class ReplayBuffer:
     def __init__(self, capacity):
