@@ -1,0 +1,216 @@
+import torch
+import torch.nn as nn
+import numpy as np
+import gymnasium as gym
+import cv2
+from collections import deque
+from torch.utils.tensorboard import SummaryWriter
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
+# Resize + grayscale preprocess
+def preprocess(obs):
+    obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
+    obs = cv2.resize(obs, (96, 96))
+    return obs.astype(np.float32) / 255.0
+
+# Stack 4 frames
+frame_stack = deque(maxlen=4)
+def stack_frames(new_obs):
+    processed = preprocess(new_obs)
+    frame_stack.append(processed)
+    while len(frame_stack) < 4:
+        frame_stack.append(processed)
+    return np.stack(frame_stack, axis=0)  # shape: [4, 96, 96]
+
+env = gym.make("CarRacing-v2", continuous=True)
+writer = SummaryWriter(log_dir="runs/ppo_carracing")
+
+class ActorCritic(nn.Module):
+    def __init__(self, input_shape, action_dim):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv2d(4, 32, 8, stride=4),  # input = 4 grayscale frames
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, stride=1),
+            nn.ReLU(),
+            nn.Flatten()
+        )
+        conv_out_size = self._get_conv_out(input_shape)
+        self.actor_mean = nn.Sequential(
+            nn.Linear(conv_out_size, 256),
+            nn.ReLU(),
+            nn.Linear(256, action_dim),
+            nn.Tanh()
+        )
+        self.log_std = nn.Parameter(torch.ones(action_dim) * -0.5)
+        self.critic = nn.Sequential(
+            nn.Linear(conv_out_size, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1)
+        )
+
+    def _get_conv_out(self, shape):
+        o = torch.zeros(1, *shape)
+        o = self.cnn(o)
+        return int(np.prod(o.size()))
+
+    def forward(self, x):
+        x = self.cnn(x)
+        mean = self.actor_mean(x)
+        std = self.log_std.exp().expand_as(mean)
+        value = self.critic(x)
+        return mean, std, value
+
+    def act(self, obs):
+        with torch.no_grad():
+            obs = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            mean, std, value = self.forward(obs)
+            dist = torch.distributions.Normal(mean, std)
+            action = dist.sample()
+            log_prob = dist.log_prob(action).sum(dim=-1)
+            return action.squeeze().cpu().numpy(), value.item(), log_prob.item()
+
+class PPOAgent:
+    def __init__(self, env, policy, optimizer, gamma=0.99, lam=0.95, eps_clip=0.2):
+        self.env = env
+        self.policy = policy
+        self.optimizer = optimizer
+        self.gamma = gamma
+        self.lam = lam
+        self.eps_clip = eps_clip
+
+    def compute_returns(self, rewards, values, dones):
+        returns = []
+        gae = 0
+        next_value = 0
+        for step in reversed(range(len(rewards))):
+            delta = rewards[step] + self.gamma * next_value * (1 - dones[step]) - values[step]
+            gae = delta + self.gamma * self.lam * (1 - dones[step]) * gae
+            next_value = values[step]
+            returns.insert(0, gae + values[step])
+        return returns
+
+    def update(self, batch, epochs=4, batch_size=64):
+        obs_tensor = torch.tensor(np.array(batch['obs']), dtype=torch.float32, device=device)
+        action_tensor = torch.tensor(np.array(batch['actions']), dtype=torch.float32, device=device)
+        return_tensor = torch.tensor(np.array(batch['returns']), dtype=torch.float32, device=device)
+        old_log_probs_tensor = torch.tensor(batch['log_probs'], dtype=torch.float32, device=device)
+        value_tensor = torch.tensor(batch['values'], dtype=torch.float32, device=device)
+
+        advantage = return_tensor - value_tensor
+        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+
+        dataset_size = len(batch['obs'])
+        losses = {'actor': 0, 'critic': 0, 'total': 0}
+        count = 0
+
+        for _ in range(epochs):
+            indices = np.arange(dataset_size)
+            np.random.shuffle(indices)
+
+            for start in range(0, dataset_size, batch_size):
+                end = start + batch_size
+                mb_idx = indices[start:end]
+
+                mb_obs = obs_tensor[mb_idx]
+                mb_actions = action_tensor[mb_idx]
+                mb_returns = return_tensor[mb_idx]
+                mb_old_log_probs = old_log_probs_tensor[mb_idx]
+                mb_advantage = advantage[mb_idx]
+
+                mean, std, value_pred = self.policy(mb_obs)
+                value_pred = value_pred.squeeze()
+                dist = torch.distributions.Normal(mean, std)
+                log_probs = dist.log_prob(mb_actions).sum(dim=1)
+                entropy = dist.entropy().sum(dim=1).mean()
+
+                ratio = torch.exp(log_probs - mb_old_log_probs)
+                clip_adv = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantage
+                loss_actor = -torch.min(ratio * mb_advantage, clip_adv).mean()
+                loss_critic = (mb_returns - value_pred).pow(2).mean()
+                loss = loss_actor + 0.5 * loss_critic - 0.01 * entropy
+
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+
+                losses['actor'] += loss_actor.item()
+                losses['critic'] += loss_critic.item()
+                losses['total'] += loss.item()
+                count += 1
+
+        for key in losses:
+            losses[key] /= count
+        return losses
+
+# Set up
+obs_shape = (4, 96, 96)
+action_dim = env.action_space.shape[0]
+policy = ActorCritic(obs_shape, action_dim).to(device)
+optimizer = torch.optim.Adam(policy.parameters(), lr=2.5e-4)
+agent = PPOAgent(env, policy, optimizer)
+
+n_episodes = 1000
+batch_size = 4096
+mini_batch_size = 64
+update_epochs = 10
+all_episode_rewards = []
+batch = {k: [] for k in ['obs', 'actions', 'rewards', 'values', 'dones', 'log_probs']}
+steps_collected = 0
+
+obs, _ = env.reset()
+obs = stack_frames(obs)
+
+for episode in range(n_episodes):
+    episode_reward = 0
+    while True:
+        action, value, log_prob = agent.policy.act(obs)
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        next_obs = stack_frames(next_obs)
+
+        # Reward shaping
+        reward += action[1] * 0.3  # Encourage throttle
+        if np.mean(next_obs[-1]) < 0.1:
+            reward -= 5  # Crude off-track penalty
+
+        done = terminated or truncated
+        batch['obs'].append(obs)
+        batch['actions'].append(action)
+        batch['rewards'].append(reward)
+        batch['values'].append(value)
+        batch['dones'].append(done)
+        batch['log_probs'].append(log_prob)
+
+        episode_reward += reward
+        steps_collected += 1
+        obs = next_obs
+
+        if done:
+            obs, _ = env.reset()
+            obs = stack_frames(obs)
+            all_episode_rewards.append(episode_reward)
+            print(f"Episode {episode} reward: {episode_reward:.2f}")
+            writer.add_scalar("Reward/Episode", episode_reward, episode)
+            if episode >= 9:
+                mean_10 = np.mean(all_episode_rewards[-10:])
+                writer.add_scalar("Reward/Mean_Last_10", mean_10, episode)
+            break
+
+        if steps_collected >= batch_size:
+            returns = agent.compute_returns(batch['rewards'], batch['values'], batch['dones'])
+            batch['returns'] = returns
+            losses = agent.update(batch, epochs=update_epochs, batch_size=mini_batch_size)
+            writer.add_scalar("Loss/Actor", losses['actor'], episode)
+            writer.add_scalar("Loss/Critic", losses['critic'], episode)
+            writer.add_scalar("Loss/Total", losses['total'], episode)
+            batch = {k: [] for k in batch}
+            steps_collected = 0
+
+    if episode % 10 == 0:
+        print(f"Episode {episode}: Mean reward last 10 episodes = {np.mean(all_episode_rewards[-10:]):.2f}")
+
+writer.close()
