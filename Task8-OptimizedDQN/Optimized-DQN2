@@ -1,281 +1,252 @@
-import gymnasium as gym
+import os
+import matplotlib
 import torch
-import torch.nn as nn
-import torch.optim as optim
+import datetime
+import csv
+
+import gymnasium as gym
+import gymnasium.wrappers as gym_wrap
+import matplotlib.pyplot as plt
 import numpy as np
-import random
-from collections import deque
-import cv2
-import time
 
-# Hyperparameters
-BATCH_SIZE = 16
-GAMMA = 0.99
-EPSILON_START = 1.0
-EPSILON_END = 0.05
-EPSILON_DECAY = 250000  # slower decay
-REPLAY_SIZE = 100000
-LR = 1e-4
-NUM_EPISODES = 2000
-TARGET_UPDATE_FREQ = 1000
-MAX_STEPS_PER_EPISODE = 1000  # longer episode
-TRAIN_EVERY = 4
-TIME_LIMIT_PER_EPISODE = 120
-TAU = 0.005  # soft target update
-ACTION_REPEAT = 4  # repeat each action for 4 frames
+from gymnasium.spaces import Box
+from tensordict import TensorDict
+from torch import nn
+from torchrl.data import TensorDictReplayBuffer, LazyMemmapStorage
 
-def preprocess(obs):
-    gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
-    resized = cv2.resize(gray, (84, 84), interpolation=cv2.INTER_AREA)
-    return resized.astype(np.uint8)
+is_ipython = 'inline' in matplotlib.get_backend()
+if is_ipython:
+    from IPython import display
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Device:", device)
 
-env = gym.make("CarRacing-v2", continuous=True, render_mode="rgb_array")
+class SkipFrame(gym.Wrapper):
+    def __init__(self, env, skip):
+        super().__init__(env)
+        self._skip = skip
 
-# Expanded discrete actions with finer granularity and coasting/brake
-ACTIONS = [
-    [0.0, 1.0, 0.0],     # straight full gas
-    [-0.1, 1.0, 0.0],    # slight left gas
-    [0.1, 1.0, 0.0],     # slight right gas
-    [-0.25, 0.7, 0.0],   # medium left less gas
-    [0.25, 0.7, 0.0],    # medium right less gas
-    [0.0, 0.5, 0.0],     # straight half gas
-    [0.0, 0.0, 0.8],     # brake
-    [-0.1, 0.0, 0.8],    # left brake
-    [0.1, 0.0, 0.8],     # right brake
-]
-NUM_ACTIONS = len(ACTIONS)
+    def step(self, action):
+        total_reward = 0.0
+        for _ in range(self._skip):
+            state, reward, terminated, truncated, info = self.env.step(action)
+            total_reward += reward
+            if terminated:
+                break
+        return state, total_reward, terminated, truncated, info
 
-"""class DQN(nn.Module):
-    def __init__(self, obs_shape, num_actions):
+
+class DQN(nn.Module):
+
+    def __init__(self, in_dim, out_dim):
         super().__init__()
-        c, h, w = obs_shape
+        cannel_n, height, width = in_dim
+
+        if height != 84 or width != 84:
+            raise ValueError(f"DQN model requires input of a (84, 84)-shape. Input of a ({height, width})-shape was passed.")
+
         self.net = nn.Sequential(
-            nn.Conv2d(c, 32, 8, stride=4),
+            nn.Conv2d(in_channels=cannel_n, out_channels=16,
+                      kernel_size=8, stride=4),
             nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=1),
+            nn.Conv2d(in_channels=16, out_channels=32,
+                      kernel_size=4, stride=2),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * 7 * 7, 512),
+            nn.Linear(2592, 256),
             nn.ReLU(),
-            nn.Linear(512, num_actions)
+            nn.Linear(256, out_dim),
         )
 
-    def forward(self, x):
-        return self.net(x)"""
-class DQN(nn.Module):
-    def __init__(self, obs_shape, num_actions):
-        super().__init__()
-        c, h, w = obs_shape
-        self.features = nn.Sequential(
-            nn.Conv2d(c, 32, 8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=1),
-            nn.ReLU(),
-            nn.Flatten()
-        )
-        self.fc_value = nn.Sequential(
-            nn.Linear(64 * 7 * 7, 512),
-            nn.ReLU(),
-            nn.Linear(512, 1)
-        )
-        self.fc_advantage = nn.Sequential(
-            nn.Linear(64 * 7 * 7, 512),
-            nn.ReLU(),
-            nn.Linear(512, num_actions)
-        )
+    def forward(self, input):
+        return self.net(input)
 
-    def forward(self, x):
-        x = self.features(x)
-        value = self.fc_value(x)
-        advantage = self.fc_advantage(x)
-        return value + (advantage - advantage.mean())
 
-class ReplayBuffer:
-    def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
+class Agent:
+    def __init__(
+            self,
+            state_space_shape,
+            action_n,
+            load_state=False,
+            load_model=None,
+            double_q=False,
+            gamma = 0.95,
+            epsilon = 1,
+            epsilon_decay = 0.9999925,
+            epsilon_min = 0.05
+            ):
+        
+        self.gamma = gamma # discounting factor
+        self.epsilon = epsilon # exploration rate
+        self.epsilon_decay = epsilon_decay # decay of exploration rate
+        self.epsilon_min = epsilon_min # minimum value of exploration rate
+        self.state_shape = state_space_shape
+        self.action_n = action_n
+        self.load_state = load_state # purpose of loading the model (training or evaluation)
+        self.double_q = double_q # if True, Double DQN is used
+        self.save_dir = './training/saved_models/'
+        self.log_dir = './training/logs/'
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.updating_net = DQN(self.state_shape, self.action_n).float()
+        self.updating_net = self.updating_net.to(device=self.device)
+        self.frozen_net = DQN(self.state_shape, self.action_n).float()
+        self.frozen_net = self.frozen_net.to(device=self.device)
+        self.optimizer = torch.optim.Adam(self.updating_net.parameters(),
+                                          lr=0.0002)
+        self.loss_fn = torch.nn.SmoothL1Loss()
+        self.buffer = TensorDictReplayBuffer(
+                storage=LazyMemmapStorage(
+                    300000,
+                    device=torch.device("cpu")))
+        self.act_taken = 0
+        self.n_updates = 0
+        if load_state:
+            if load_model == None:
+                raise ValueError(f"Specify a model name for loading.")
+            load_dir = self.save_dir
+            self.load_model = load_model
+            self.load(load_dir, load_model)
+        
 
-    def push(self, state, action, reward, next_state, done):
-        self.buffer.append((state, action, reward, next_state, done))
+    def store(self, state, action, reward, new_state, terminated):
+        self.buffer.add(TensorDict({
+                    "state": torch.tensor(state),
+                    "action": torch.tensor(action),
+                    "reward": torch.tensor(reward),
+                    "new_state": torch.tensor(new_state),
+                    "terminated": torch.tensor(terminated)
+                    }, batch_size=[]))
 
-    def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
-        state, action, reward, next_state, done = map(np.array, zip(*batch))
-        return state, action, reward, next_state, done
+    def get_samples(self, batch_size):
+        batch = self.buffer.sample(
+            batch_size)
+        states = batch.get('state').type(torch.FloatTensor).to(self.device)
+        new_states = batch.get('new_state').type(torch.FloatTensor).to(self.device)
+        actions = batch.get('action').squeeze().to(self.device)
+        rewards = batch.get('reward').squeeze().to(self.device)
+        terminateds = batch.get('terminated').squeeze().to(self.device)
+        return states, actions, rewards, new_states, terminateds
 
-    def __len__(self):
-        return len(self.buffer)
+    def take_action(self, state):
+        if np.random.rand() < self.epsilon:
+            action_idx = np.random.randint(self.action_n)
+        else:
+            state = torch.tensor(
+                state,
+                dtype=torch.float32,
+                device=self.device
+                ).unsqueeze(0)
+            action_values = self.updating_net(state)
+            action_idx = torch.argmax(action_values, axis=1).item()
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+        else:
+            self.epsilon = self.epsilon_min
+        self.act_taken += 1
+        return action_idx
 
-class FrameStack:
-    def __init__(self, k):
-        self.k = k
-        self.frames = deque([], maxlen=k)
-
-    def reset(self, obs):
-        frame = preprocess(obs)
-        for _ in range(self.k):
-            self.frames.append(frame)
-        return self._get_stack()
-
-    def step(self, obs):
-        frame = preprocess(obs)
-        self.frames.append(frame)
-        return self._get_stack()
-
-    def _get_stack(self):
-        return np.stack(self.frames, axis=0)
-
-q_net = DQN((4, 84, 84), NUM_ACTIONS).to(device)
-target_net = DQN((4, 84, 84), NUM_ACTIONS).to(device)
-target_net.load_state_dict(q_net.state_dict())
-target_net.eval()
-
-optimizer = optim.Adam(q_net.parameters(), lr=LR)
-replay_buffer = ReplayBuffer(REPLAY_SIZE)
-
-# Warm-up replay buffer with random actions
-print("Warming up replay buffer...")
-frame_stack = FrameStack(k=4)
-obs, _ = env.reset()
-state_np = frame_stack.reset(obs)
-state = torch.tensor(state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
-
-while len(replay_buffer) < 5000:  # warm up more for stability
-    action_idx = random.randrange(NUM_ACTIONS)
-    action = ACTIONS[action_idx]
-
-    total_reward = 0
-    done = False
-    for _ in range(ACTION_REPEAT):
-        next_obs, reward, terminated, truncated, _ = env.step(action)
-        done = terminated or truncated
-        total_reward += reward
-        if done:
-            break
-
-    next_state_np = frame_stack.step(next_obs)
-    next_state = torch.tensor(next_state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
-
-    replay_buffer.push(
-        state.squeeze(0).cpu().numpy(),
-        action_idx,
-        total_reward,
-        next_state.squeeze(0).cpu().numpy(),
-        done
-    )
-    state = next_state if not done else torch.tensor(
-        frame_stack.reset(env.reset()[0]), dtype=torch.float32).unsqueeze(0).to(device) / 255.0
-
-epsilon = EPSILON_START
-step_count = 0
-
-episode_rewards = []
-losses = []
-
-for episode in range(NUM_EPISODES):
-    obs, _ = env.reset()
-    state_np = frame_stack.reset(obs)
-    state = torch.tensor(state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
-    episode_reward = 0
-    done = False
-    step = 0
-    episode_start_time = time.time()
-
-    while not done and step < MAX_STEPS_PER_EPISODE:
-        step += 1
-        step_count += 1
-
-        # Linear epsilon decay with minimum epsilon floor
-        epsilon = max(EPSILON_END, EPSILON_START - step_count / EPSILON_DECAY)
-
-        if random.random() < epsilon:
-            action_idx = random.randrange(NUM_ACTIONS)
+    def update_net(self, batch_size):
+        self.n_updates += 1
+        states, actions, rewards, \
+            new_states, terminateds = self.get_samples(batch_size)
+        action_values = self.updating_net(states)
+        td_est = action_values[np.arange(batch_size), actions]
+        if self.double_q:
+            with torch.no_grad():
+                next_actions = torch.argmax(self.updating_net(new_states), axis=1)
+                tar_action_values = self.frozen_net(new_states)
+            td_tar = rewards + (1 - terminateds.float()) \
+                * self.gamma*tar_action_values[np.arange(batch_size), next_actions]
         else:
             with torch.no_grad():
-                q_values = q_net(state)
-                action_idx = q_values.argmax().item()
+                tar_action_values = self.frozen_net(new_states)
+            td_tar = rewards + (1 - terminateds.float()) * self.gamma*tar_action_values.max(1)[0]
+        loss = self.loss_fn(td_est, td_tar)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        loss = loss.item()
+        return td_est, loss
 
-        action = ACTIONS[action_idx]
+    def save(self, save_dir, save_name):
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        save_path = save_dir + save_name + f"_{self.act_taken}.pt"
+        torch.save({
+            'upd_model_state_dict': self.updating_net.state_dict(),
+            'frz_model_state_dict': self.frozen_net.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'replay_buffer': self.buffer,
+            'action_number': self.act_taken,
+            'epsilon': self.epsilon
+            }, save_path)
+        print(f"Model saved to {save_path} at step {self.act_taken}")
 
-        # Repeat action multiple frames for smoother control
-        total_reward = 0
-        for _ in range(ACTION_REPEAT):
-            next_obs, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            # Reward shaping
-            reward += action[1] * 0.3  # encourage gas
-            reward -= abs(action[0]) * 0.15  # penalize sharp steering
-            reward -= action[2] * 0.3  # penalize braking
-            total_reward += reward
-            if done:
-                break
+    def load(self, load_dir, model_name):
+        loaded_model = torch.load(load_dir+model_name)
+        upd_net_param = loaded_model['upd_model_state_dict']
+        frz_net_param = loaded_model['frz_model_state_dict']
+        opt_param = loaded_model['optimizer_state_dict']
+        self.updating_net.load_state_dict(upd_net_param)
+        self.frozen_net.load_state_dict(frz_net_param)
+        self.optimizer.load_state_dict(opt_param)
+        if self.load_state == 'eval':
+            self.updating_net.eval()
+            self.frozen_net.eval()
+            self.epsilon_min = 0
+            self.epsilon = 0
+        elif self.load_state == 'train':
+            self.updating_net.train()
+            self.frozen_net.train()
+            self.act_taken = loaded_model['action_number']
+            self.epsilon = loaded_model['epsilon']
+        else:
+            raise ValueError(f"Unknown load state. Should be either 'eval' or 'train'.")
+        
+    def write_log(
+            self,
+            date_list,
+            time_list,
+            reward_list,
+            length_list,
+            loss_list,
+            epsilon_list,
+            log_filename='default_log.csv'
+            ):
 
-        next_state_np = frame_stack.step(next_obs)
-        next_state = torch.tensor(next_state_np, dtype=torch.float32).unsqueeze(0).to(device) / 255.0
+        if not os.path.exists(self.log_dir):
+            os.makedirs(self.log_dir)
+        rows = [['date']+date_list,
+                ['time']+time_list,
+                ['reward']+reward_list,
+                ['length']+length_list,
+                ['loss']+loss_list,
+                ['epsilon']+epsilon_list]
+        with open(self.log_dir+log_filename, 'w') as csvfile:  
+            csvwriter = csv.writer(csvfile)    
+            csvwriter.writerows(rows)
 
-        replay_buffer.push(
-            state.squeeze(0).cpu().numpy(),
-            action_idx,
-            total_reward,
-            next_state.squeeze(0).cpu().numpy(),
-            done
-        )
 
-        state = next_state
-        episode_reward += total_reward
-
-        # Train every TRAIN_EVERY steps if enough samples
-        if step_count % TRAIN_EVERY == 0 and len(replay_buffer) > BATCH_SIZE:
-            s, a, r, s_next, d = replay_buffer.sample(BATCH_SIZE)
-
-            s = torch.tensor(s, dtype=torch.float32).to(device)
-            s_next = torch.tensor(s_next, dtype=torch.float32).to(device)
-            a = torch.tensor(a, dtype=torch.int64).to(device)
-            r = torch.tensor(r, dtype=torch.float32).to(device)
-            d = torch.tensor(d, dtype=torch.float32).to(device)
-
-            q_values = q_net(s).gather(1, a.unsqueeze(1)).squeeze()
-            with torch.no_grad():
-                best_actions = q_net(s_next).argmax(1).unsqueeze(1)
-                next_q_values = target_net(s_next).gather(1, best_actions).squeeze()
-                targets = r + GAMMA * next_q_values * (1 - d)
-
-            loss = nn.SmoothL1Loss()(q_values, targets)
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(q_net.parameters(), 1.0)
-            optimizer.step()
-            losses.append(loss.item())
-
-            # Soft update
-            for target_param, param in zip(target_net.parameters(), q_net.parameters()):
-                target_param.data.copy_(TAU * param.data + (1.0 - TAU) * target_param.data)
-
-        if step_count % TARGET_UPDATE_FREQ == 0:
-            target_net.load_state_dict(q_net.state_dict())
-
-        if time.time() - episode_start_time > TIME_LIMIT_PER_EPISODE:
-            print("Episode time limit exceeded.")
-            break
-
-    episode_rewards.append(episode_reward)
-    print(f"Episode {episode} - Reward: {episode_reward:.2f} - Epsilon: {epsilon:.3f}")
-
-    if episode % 10 == 0 and episode > 0:
-        torch.save(q_net.state_dict(), f"checkpoint_episode_{episode}.pt")
-        avg_reward = np.mean(episode_rewards[-10:])
-        avg_loss = np.mean(losses[-100:]) if losses else 0
-        print(f"[Episode {episode}] Avg Reward (last 10): {avg_reward:.2f}")
-        print(f"[Episode {episode}] Avg Loss (last 100): {avg_loss:.5f}")
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    frame_stack.reset(obs)
-
-env.close()
+def plot_reward(episode_num, reward_list, n_steps):
+    plt.figure(1)
+    rewards_tensor = torch.tensor(reward_list, dtype=torch.float)
+    if len(rewards_tensor) >= 11:
+        eval_reward = torch.clone(rewards_tensor[-10:])
+        mean_eval_reward = round(torch.mean(eval_reward).item(), 2)
+        std_eval_reward = round(torch.std(eval_reward).item(), 2)
+        plt.clf()
+        plt.title(f'Episode #{episode_num}: {n_steps} steps, \
+                  reward {mean_eval_reward}±{std_eval_reward}')
+    else:
+        plt.clf()
+        plt.title('Training...')
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    plt.plot(rewards_tensor.numpy())
+    if len(rewards_tensor) >= 50:
+        reward_f = torch.clone(rewards_tensor[:50])
+        means = rewards_tensor.unfold(0, 50, 1).mean(1).view(-1)
+        means = torch.cat((torch.ones(49)*torch.mean(reward_f), means))
+        plt.plot(means.numpy())
+    plt.pause(0.001)
+    if is_ipython:
+        display.display(plt.gcf())
+        display.clear_output(wait=True)
