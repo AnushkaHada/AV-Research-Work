@@ -8,259 +8,186 @@ from collections import deque
 import cv2
 import os
 import csv
+import torch.nn.functional as F
 
-# Use GPU if avalible. 
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
-          
-# Makes the observations ready for proccesing by PPO
-def preprocess_PPO(obs):
-    # CarRacing Environment gives a 96x96x3 image. 
-    obs = obs.transpose(2,0,1) # converts from HWC to CHW
-    obs = torch.tensor(obs, dtype=torch.float32) /255.0  # keep shape (C,H,W) and the 255 normalizes the pixel values between [0,1]
-    return obs # shape: (3, 96, 96)
+# --- Discrete action mapping ---
+DISCRETE_ACTIONS = [
+    np.array([0, 0, 0], dtype=np.float32),   # no-op
+    np.array([-1, 0, 0], dtype=np.float32),  # left
+    np.array([1, 0, 0], dtype=np.float32),   # right
+    np.array([0, 1, 0], dtype=np.float32),   # gas
+    np.array([0, 0, 0.8], dtype=np.float32)  # brake
+]
 
-# Contains an Actor that decides the action and a Critic that estimates how good that action is. 
+# --- Preprocessing ---
+def preprocess(obs):
+    obs = obs.transpose(2, 0, 1)  # HWC -> CHW
+    obs = torch.tensor(obs, dtype=torch.float32) / 255.0
+    return obs
+
+# --- Actor-Critic ---
 class ActorCritic(nn.Module):
-    '''
-        Since CarRacing is an image based environment it needs a CNN to extract features. 
-        The CNN was redone using Nature CNN from stable Baselines as a refrence, since my original CNN was messed up. 
-        https://github.com/openai/baselines/blob/master/baselines/ppo1/cnn_policy.py 
-        # Car racing has a shape of (3, 96, 96)
-    '''
     def __init__(self, obs_shape, action_dim):
-        
         super().__init__()
-        
-        C, H, W = obs_shape  # Assume CxHxW images (channels first)
+        C, H, W = obs_shape
         self.cnn = nn.Sequential(
-            nn.Conv2d(C, 32, kernel_size=8, stride=4),   # out: (32, 23, 23)
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),  # out: (64, 10, 10)
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),  # out: (64, 8, 8)
-            nn.ReLU()
+            nn.Conv2d(C, 32, 8, 4), nn.ReLU(),
+            nn.Conv2d(32, 64, 4, 2), nn.ReLU(),
+            nn.Conv2d(64, 64, 3, 1), nn.ReLU()
         )
-        
-        # computes the size for flattening. 
         with torch.no_grad():
-            sample = torch.zeros(1, C, H, W) 
-            flat_size = self.cnn(sample).view(1,-1).size(1)
-        
-        # Fully connected layer
+            flat_size = self.cnn(torch.zeros(1, C, H, W)).view(1, -1).size(1)
         self.fc = nn.Sequential(
-            nn.Linear(flat_size, 512),
-            nn.ReLU()
+            nn.Linear(flat_size, 512), nn.ReLU()
         )
-        # Policy mean
-        self.actor_mean = nn.Linear(512, action_dim)
-        
-        # initializes log_std to -0.5 to prevent high varience at the start
-        self.log_std = nn.Parameter(torch.zeros(action_dim) * -0.5)
-        
-        self.critic = nn.Linear(512, 1) # critic returns a singular value for advantage estimation. 
-    
+        self.actor_logits = nn.Linear(512, action_dim)
+        self.critic = nn.Linear(512, 1)
+
     def forward(self, obs):
-        # obs must be (B, C, H, W)
-        features = self.cnn(obs)
-        
-        # flattens the output for the fully connected convolutional network as nn.Linear want 2D inputs, (batch_size, features).
-        # shape (B, 64*8*8) = (B, 4096).
-        features = features.view(features.size(0), -1)
-        # reduces features from 4096 to 512(specific feature number gotten from PPO implementated by the paper.)
-        # Features is now a feature vector representing the environment. Shape: (B, 512)
-        features = self.fc(features)
-        
-        # inear layer maps the features to the mean of each action dimension. This is the mean of the guassian policy. 
-        mean = self.actor_mean(features)
-        # expand_as makes std the same shape as mean. Std is a learnable parameter. 
-        std = self.log_std.exp().expand_as(mean)
-        # Return single value per state. Shape: (B, 1)
-        value = self.critic(features)
-        
-        return mean, std, value
-    
+        x = self.cnn(obs).view(obs.size(0), -1)
+        x = self.fc(x)
+        logits = self.actor_logits(x)
+        value = self.critic(x)
+        return logits, value
+
     def act(self, obs):
-        logits = self.actor_mean(features)  # output shape = action_dim = 5
+        obs = obs.unsqueeze(0).to(device)
+        logits, value = self.forward(obs)
         dist = torch.distributions.Categorical(logits=logits)
-        action = dist.sample()
-        log_prob = dist.log_prob(action)
-        
+        action_idx = dist.sample()
+        log_prob = dist.log_prob(action_idx)
+        return action_idx.item(), log_prob.squeeze(0), value.squeeze(0)
 
-        return action.squeeze(0), log_prob.squeeze(0), value.squeeze(0) 
-
-
+# --- PPO Agent ---
 class PPOAgent():
-    def __init__(self, env, policy, optimizer, gamma=0.99, lam=0.95, eps_clip=0.2):
-        self.env = env
+    def __init__(self, policy, optimizer, gamma=0.99, lam=0.95, eps_clip=0.2):
         self.policy = policy
         self.optimizer = optimizer
-        
-        #discount factor for rewards. How much future reward matter. 
-        #If 0, only care for immidiate rewards. else 1 if future rewards matter a lot.  
-        self.gamma = gamma 
-        
-        #How much to smooth advantage (Generalized Advantage Estimation). GAE lambda parameter. 
-        self.lam = lam 
-        self.eps_clip = eps_clip # Clip range between old and new policy log_probabilites. 
-         
+        self.gamma = gamma
+        self.lam = lam
+        self.eps_clip = eps_clip
+
     def compute_returns(self, rewards, values, dones):
-        # PPO comuptes advatages backward through time. 
-        returns = [] # returns are stored in list for training purposes. 
+        returns = []
         gae = 0
         next_value = 0
         for step in reversed(range(len(rewards))):
-            
-            # Delta measures how suprising the reward was given the value estimate. 
-            # γ is gamma or the discount factor.  
-            # delta = reward + γ * V(s') - V(s)  
-            # dones[step] indicates if the episode ended. 
-            # If episode ended, 1, the discount factor would not be included in the calculation. 
-            # If the episode did not end, then we would take into account future rewards(discount factor would be multiplied by 1, instead of 0 due to (1-0) code). 
             delta = rewards[step] + self.gamma * next_value * (1 - dones[step]) - values[step]
-            
-            # Gae = delta + γ * λ * (1 - done) * gae. This smoothes out advantage over multiple steps. 
-            # λ controls bias/variance tradeoff. Lower means more biased, less varience
             gae = delta + self.gamma * self.lam * (1 - dones[step]) * gae
-            
-            next_value = values[step] # updates value
-            returns.insert(0, gae + values[step]) # gae + values[step] is th target for the critic. 
+            next_value = values[step]
+            returns.insert(0, gae + values[step])
         return returns
-    
-    def update(self, batch, epoches = 4, batch_size = 64):
-        # converts batch data to pytorch tensors. 
-        # to device means GPU or CPU. torch.stack concatenates a sequence of tensors along a new dimension. So output has one more dimension then input. 
+
+    def update(self, batch, epochs=4, batch_size=64):
         obs_tensor = torch.stack(batch['obs']).to(device)
-        actions_tensor = torch.stack(batch['actions']).to(device)
+        actions_tensor = torch.tensor(batch['actions'], dtype=torch.long, device=device)
         returns_tensor = torch.tensor(batch['returns'], dtype=torch.float32, device=device)
         old_log_probs_tensor = torch.tensor(batch['log_probs'], dtype=torch.float32, device=device)
         values_tensor = torch.tensor(batch['values'], dtype=torch.float32, device=device)
-        
-        # computs normalized advantage. How much better an action was than expected. 
+
         advantage = returns_tensor - values_tensor
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-        
+
         dataset_size = len(batch['obs'])
         losses = {'actor': 0, 'critic': 0, 'total':0}
         count = 0
-        
-        for i in range(epoches):
+
+        for _ in range(epochs):
             indices = np.arange(dataset_size)
             np.random.shuffle(indices)
-            
-            # loops through dataset, taking a certain number of samples each time(batch_size)
             for start in range(0, dataset_size, batch_size):
                 end = start + batch_size
-                minibatch_idx = indices[start:end]
-                
-                mb_obs = obs_tensor[minibatch_idx]
-                mb_actions = actions_tensor[minibatch_idx]
-                mb_returns = returns_tensor[minibatch_idx]
-                mb_old_log_probs = old_log_probs_tensor[minibatch_idx]
-                mb_advantage = advantage[minibatch_idx]
-                
-                # Get the predition based on our policy
-                mean_pred, std_pred, value_pred = self.policy(mb_obs)
+                idx = indices[start:end]
+                mb_obs = obs_tensor[idx]
+                mb_actions = actions_tensor[idx]
+                mb_adv = advantage[idx]
+                mb_returns = returns_tensor[idx]
+                mb_old_log_probs = old_log_probs_tensor[idx]
+
+                logits_pred, value_pred = self.policy(mb_obs)
                 value_pred = value_pred.squeeze()
-                
-                # get distribution based on predicted mean and std
-                dist = torch.distributions.Normal(mean_pred, std_pred)
-                # get the log probabilites and sum them together. 
-                log_probs = dist.log_prob(mb_actions).sum(dim=1)
-                # get the ratio 
+                dist = torch.distributions.Categorical(logits=logits_pred)
+                log_probs = dist.log_prob(mb_actions)
+
                 ratio = torch.exp(log_probs - mb_old_log_probs)
-                # clipping the advantage 
-                clip_adv = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * mb_advantage
-                loss_actor = -torch.min(ratio * mb_advantage, clip_adv).mean()
-                loss_critic = (mb_returns-value_pred).pow(2).mean()
-                entropy = dist.entropy().sum(dim=1).mean()
+                clip_adv = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * mb_adv
+                loss_actor = -torch.min(ratio * mb_adv, clip_adv).mean()
+                loss_critic = F.mse_loss(mb_returns, value_pred)
+                entropy = dist.entropy().mean()
                 loss = loss_actor + 0.5 * loss_critic - 0.01 * entropy
-                
-                # Reset gradiet each loop
+
                 self.optimizer.zero_grad()
-                loss.backward() # backprobagate. 
+                loss.backward()
                 self.optimizer.step()
-                
-                # updating are losses dict
+
                 losses['actor'] += loss_actor.item()
                 losses['critic'] += loss_critic.item()
                 losses['total'] += loss.item()
                 count += 1
+
         for key in losses:
             losses[key] /= count
         return losses
-                
-                     
-        
-def run_PPO(env_name = "CarRacing-v3", episodes = 1000):
-    env = gym.make(env_name, continuous=True)
-    # Fix: get CHW shape after preprocessing
-    sample_obs, _ = env.reset()
-    sample_obs = preprocess_PPO(sample_obs)  # (3, 96, 96)
-    obs_shape = sample_obs.shape
 
-    action_dim = env.action_space.shape[0]
+# --- Training Loop ---
+def run_PPO(env_name="CarRacing-v3", episodes=1000):
+    env = gym.make(env_name, continuous=False)
+    sample_obs, _ = env.reset()
+    sample_obs = preprocess(sample_obs)
+    obs_shape = sample_obs.shape
+    action_dim = len(DISCRETE_ACTIONS)
 
     policy = ActorCritic(obs_shape, action_dim).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=3e-4)
-    agent = PPOAgent(env, policy, optimizer)
-    
-    # uses some basic hyperparameters that are common for RL models. 
-    
+    agent = PPOAgent(policy, optimizer)
+
     batch_size = 2048
     mini_batch_size = 64
-    update_epochs = 10 
-    
-    all_rewards = []
+    update_epochs = 10
+
     batch = {'obs': [], 'actions':[], 'rewards':[], 'values':[], 'dones':[], 'log_probs':[]}
     steps_collected = 0
-    
-    # starting with clean env
     obs, _ = env.reset()
-    obs = preprocess_PPO(obs)
-    done = False # episode has not ended, thus done is initialized to false. 
-    
-    # training loop 
+    obs = preprocess(obs)
+
     for episode in range(episodes):
         episode_reward = 0
-        
-        while True: 
-            action, log_prob, value = policy.act(obs)
-            action_np = action.detach().cpu().numpy().astype(np.float32)
+        done = False
+        while not done:
+            action_idx, log_prob, value = policy.act(obs)
+            action_np = DISCRETE_ACTIONS[action_idx]
             next_obs, reward, terminated, truncated, _ = env.step(action_np)
-            # Details from env after taking an action
-            next_obs = preprocess_PPO(next_obs)
-            done = terminated or truncated # episode is finished if conditions are met. 
-            
-            reward += action[1] * 0.3 # applies reward shaping. 
-            
+            next_obs = preprocess(next_obs)
+            done = terminated or truncated
+
             batch['obs'].append(obs)
-            batch['actions'].append(torch.tensor(action, dtype=torch.float32))
+            batch['actions'].append(action_idx)
             batch['rewards'].append(reward)
             batch['values'].append(value.cpu().item())
             batch['dones'].append(done)
             batch['log_probs'].append(log_prob.item())
-            
-            episode_reward += reward # adding reward to total episode reward. 
+
+            episode_reward += reward
             steps_collected += 1
-            obs = next_obs # after taking the action, update the obs
-            
-            # if episode is done
-            if done: 
-                obs, _ = env.reset() # reset env
-                obs = preprocess_PPO(obs)
-                all_rewards.append(episode_reward)
+            obs = next_obs
+
+            if done:
+                obs, _ = env.reset()
+                obs = preprocess(obs)
                 print(f"Episode {episode} reward: {episode_reward:.2f}")
-                episode_reward = 0 # reset episode reward
+                episode_reward = 0
                 break
-            
-        if steps_collected >= batch_size: 
+
+        if steps_collected >= batch_size:
             returns = agent.compute_returns(batch['rewards'], batch['values'], batch['dones'])
             batch['returns'] = returns
-            losses = agent.update(batch, epoches=update_epochs, batch_size=mini_batch_size)
+            agent.update(batch, epochs=update_epochs, batch_size=mini_batch_size)
             batch = {k: [] for k in batch}
-            steps_collected = 0 # reset steps. 
+            steps_collected = 0
 
 # ====================DQN===============================================================
 
