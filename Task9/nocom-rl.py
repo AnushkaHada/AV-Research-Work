@@ -4,10 +4,18 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import gymnasium as gym
-from gymnasium.wrappers import DiscreteActionWrapper
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
+
+# --- Discrete to continuous action mapping ---
+DISCRETE_ACTIONS = [
+    np.array([0.0, 0.0, 0.0], dtype=np.float32),  # no-op
+    np.array([-1.0, 0.0, 0.0], dtype=np.float32), # left
+    np.array([1.0, 0.0, 0.0], dtype=np.float32),  # right
+    np.array([0.0, 1.0, 0.0], dtype=np.float32),  # gas
+    np.array([0.0, 0.0, 0.8], dtype=np.float32),  # brake
+]
 
 # --- Preprocessing ---
 def preprocess(obs):
@@ -102,16 +110,15 @@ class PPOAgent:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
                 self.optim.step()
 
+        print(f"[DEBUG] PPO Update done. Batch size: {N}, Epochs: {epochs}")
+
 # --- Training Loop ---
 def run_PPO(env_name="CarRacing-v3", episodes=500):
-    # --- Use DiscreteActionWrapper for proper discrete actions ---
-    env = gym.make(env_name, render_mode=None)  # default continuous Box(3)
-    env = DiscreteActionWrapper(env)  # now env.action_space = Discrete(5)
-
+    env = gym.make(env_name, render_mode=None)
     obs, _ = env.reset()
     obs = preprocess(obs)
     shape = obs.shape
-    action_dim = env.action_space.n  # 5 discrete actions
+    action_dim = len(DISCRETE_ACTIONS)
 
     policy = ActorCritic(shape, action_dim).to(device)
     optim = torch.optim.Adam(policy.parameters(), lr=3e-4)
@@ -119,18 +126,19 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
 
     BATCH = 2048
     batch = {k: [] for k in ["obs", "actions", "rewards", "values", "dones", "logp"]}
-
     steps = 0
     ep_reward = 0
 
     for ep in range(episodes):
+        print(f"\n[DEBUG] Starting Episode {ep}")
         done = False
         while not done:
             a, lp, v = policy.act(obs)
-            # --- Pass Python int directly to step ---
-            next_obs, r, term, trunc, _ = env.step(a)
-            done = term or trunc
+            a_np = DISCRETE_ACTIONS[a]
+            print(f"[DEBUG] Action idx: {a}, Mapped action: {a_np}")
 
+            next_obs, r, term, trunc, _ = env.step(a_np)
+            done = term or trunc
             next_obs = preprocess(next_obs)
 
             batch["obs"].append(obs)
@@ -145,7 +153,7 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
             steps += 1
 
             if done:
-                print(f"Episode {ep}  Reward: {ep_reward:.1f}")
+                print(f"[DEBUG] Episode {ep} done. Reward: {ep_reward:.1f}, Steps: {steps}")
                 ep_reward = 0
                 obs, _ = env.reset()
                 obs = preprocess(obs)
@@ -158,6 +166,7 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
             batch["returns"] = returns
 
             agent.update(batch, epochs=10, minibatch=64)
+            print(f"[DEBUG] Batch update completed at step {steps}")
 
             batch = {k: [] for k in ["obs", "actions", "rewards", "values", "dones", "logp"]}
             steps = 0
