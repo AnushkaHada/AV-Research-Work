@@ -159,8 +159,7 @@ def run_PPO(env_name="CarRacing-v3", episodes=1000):
         done = False
         while not done:
             action_idx, log_prob, value = policy.act(obs)
-            action_np = DISCRETE_ACTIONS[action_idx]
-            next_obs, reward, terminated, truncated, _ = env.step(action_np)
+            next_obs, reward, terminated, truncated, _ = env.step(action_idx)
             next_obs = preprocess(next_obs)
             done = terminated or truncated
 
@@ -174,7 +173,7 @@ def run_PPO(env_name="CarRacing-v3", episodes=1000):
             episode_reward += reward
             steps_collected += 1
             obs = next_obs
-
+            
             if done:
                 obs, _ = env.reset()
                 obs = preprocess(obs)
