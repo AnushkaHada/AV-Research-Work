@@ -6,7 +6,6 @@ import torch.optim as optim
 import random
 from collections import deque
 import cv2
-import time
 import os
 import csv
 
