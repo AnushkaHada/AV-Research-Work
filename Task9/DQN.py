@@ -75,7 +75,7 @@ DISCRETE_ACTIONS = [
 # ==========================
 # Main Training Loop
 # ==========================
-def train_dqn(episodes=2000):
+def train_dqn(episodes=600):
 
     env = gym.make("CarRacing-v3", continuous=True, render_mode=None)
 
