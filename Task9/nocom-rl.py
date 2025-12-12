@@ -40,17 +40,16 @@ class ActorCritic(nn.Module):
         logits, value = self.forward(obs)
         dist = torch.distributions.Categorical(logits=logits)
         action = dist.sample()
-        return action.item(), dist.log_prob(action).item(), value.item()
+        return int(action.item()), dist.log_prob(action).item(), value.item()
 
 # --- PPO Agent ---
 class PPOAgent:
-    def __init__(self, policy, optimizer, gamma=0.99, lam=0.95, eps=0.2):
+    def __init__(self, policy, optimizer, gamma=0.99, lam=0.95, eps_clip=0.2):
         self.policy = policy
-        self.optim = optimizer
+        self.optimizer = optimizer
         self.gamma = gamma
         self.lam = lam
-        self.eps = eps
-
+        self.eps_clip = eps_clip
 
     def compute_returns(self, rewards, dones, last_val):
         R = last_val
@@ -89,7 +88,7 @@ class PPOAgent:
 
                 ratio = torch.exp(logp - mb_old_logp)
                 surr1 = ratio * mb_adv
-                surr2 = torch.clamp(ratio, 1 - self.eps, 1 + self.eps) * mb_adv
+                surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * mb_adv
 
                 loss_actor = -torch.min(surr1, surr2).mean()
                 loss_critic = F.mse_loss(mb_ret, val)
@@ -97,23 +96,22 @@ class PPOAgent:
 
                 loss = loss_actor + 0.5 * loss_critic - 0.01 * loss_entropy
 
-                self.optim.zero_grad()
+                self.optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
-                self.optim.step()
+                self.optimizer.step()
 
 # --- Training Loop ---
 def run_PPO(env_name="CarRacing-v3", episodes=500):
-    env = gym.make(env_name, continuous=False)  # DISCRETE
+    env = gym.make(env_name, continuous=False)  # Discrete action space
     obs, _ = env.reset()
     obs = preprocess(obs)
     shape = obs.shape
     action_dim = env.action_space.n
 
     policy = ActorCritic(shape, action_dim).to(device)
-    optimizer = optim.Adam(policy.parameters(), lr=3e-4)  # renamed from 'optim'
+    optimizer = optim.Adam(policy.parameters(), lr=3e-4)
     agent = PPOAgent(policy, optimizer)
-
 
     BATCH = 2048
     batch = {k: [] for k in ["obs", "actions", "rewards", "values", "dones", "logp"]}
@@ -122,18 +120,12 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
 
     for ep in range(episodes):
         done = False
-        first_step = True
-
         while not done:
             a, lp, v = policy.act(obs)
+            print(f"[DEBUG] Episode {ep} action idx: {a}")  # minimal debug
 
-            # DEBUG: first action of episode
-            if first_step:
-                print(f"[DEBUG] Episode {ep} first action idx: {a}")
-                first_step = False
-
-            # --- Pass as 1D np.array for discrete CarRacing-v3 ---
-            next_obs, r, term, trunc, _ = env.step(np.array([a], dtype=np.int64))
+            # Pass plain int to env.step()
+            next_obs, r, term, trunc, _ = env.step(a)
             done = term or trunc
             next_obs = preprocess(next_obs)
 
@@ -149,7 +141,7 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
             steps += 1
 
             if done:
-                print(f"[DEBUG] Episode {ep} done. Reward: {ep_reward:.1f}")
+                print(f"Episode {ep}  Reward: {ep_reward:.1f}")
                 ep_reward = 0
                 obs, _ = env.reset()
                 obs = preprocess(obs)
@@ -157,9 +149,12 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
         if steps >= BATCH:
             with torch.no_grad():
                 last_val = policy.act(obs)[2]
-            batch["returns"] = agent.compute_returns(batch["rewards"], batch["dones"], last_val)
+
+            returns = agent.compute_returns(batch["rewards"], batch["dones"], last_val)
+            batch["returns"] = returns
+
             agent.update(batch, epochs=10, minibatch=64)
-            batch = {k: [] for k in batch}
+            batch = {k: [] for k in ["obs", "actions", "rewards", "values", "dones", "logp"]}
             steps = 0
 
 if __name__ == "__main__":
