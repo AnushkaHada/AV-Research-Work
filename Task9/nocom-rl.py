@@ -128,20 +128,21 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
     steps = 0
     ep_reward = 0
 
+    # --- Training Loop ---
     for ep in range(episodes):
         done = False
         first_step = True
 
         while not done:
-            a, lp, v = policy.act(obs)
-            a_np = DISCRETE_ACTIONS[a]
+            a, lp, v = policy.act(obs)  # a is already an int index from 0..4
 
-            # Minimal debug: only first action of episode
+            # --- DEBUG: only for first step ---
             if first_step:
-                print(f"[DEBUG] Episode {ep} first action idx: {a}, Mapped action: {a_np}")
+                print(f"[DEBUG] Episode {ep} first action idx: {a}")
                 first_step = False
 
-            next_obs, r, term, trunc, _ = env.step(a_np)
+            # Directly pass integer for discrete action space
+            next_obs, r, term, trunc, _ = env.step(a)
             done = term or trunc
             next_obs = preprocess(next_obs)
 
@@ -157,10 +158,11 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
             steps += 1
 
             if done:
-                print(f"[DEBUG] Episode {ep} done. Reward: {ep_reward:.1f}, Steps: {steps}")
+                print(f"[DEBUG] Episode {ep} done. Reward: {ep_reward:.1f}")
                 ep_reward = 0
                 obs, _ = env.reset()
                 obs = preprocess(obs)
+
 
         # PPO update
         if steps >= BATCH:
