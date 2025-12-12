@@ -401,4 +401,4 @@ def run_DQN(env_name="CarRacing-v3", episodes=1000):
 
 if __name__ == "__main__":
     run_PPO(episodes=10)  # or run_PPO(...) if you want to test PPO
-    run_DQN(episodes=10)
+    #run_DQN(episodes=10)
