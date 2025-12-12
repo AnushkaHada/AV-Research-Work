@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 import gymnasium as gym
-import torch.optim as optim
 import torch.nn.functional as F
 
 
@@ -132,7 +131,11 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
 
         while not done:
             a, lp, v = policy.act(obs)
+
+            # --- FIX: Force int, convert to numpy int64 ---
+            a = int(a)
             a_np = np.array(a, dtype=np.int64)
+
             next_obs, r, term, trunc, _ = env.step(a_np)
             done = term or trunc
 
