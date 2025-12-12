@@ -132,7 +132,8 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
 
         while not done:
             a, lp, v = policy.act(obs)
-            next_obs, r, term, trunc, _ = env.step(a)  # <- ONLY PASS INT
+            a_np = np.array(a, dtype=np.int64)
+            next_obs, r, term, trunc, _ = env.step(a_np)
             done = term or trunc
 
             next_obs = preprocess(next_obs)
