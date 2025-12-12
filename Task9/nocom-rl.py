@@ -135,7 +135,7 @@ class PPOAgent():
 
 # --- Training Loop ---
 def run_PPO(env_name="CarRacing-v3", episodes=1000):
-    env = gym.make(env_name, continuous=False)
+    env = gym.make(env_name, continuous=False)  # Discrete action space
     sample_obs, _ = env.reset()
     sample_obs = preprocess(sample_obs)
     obs_shape = sample_obs.shape
@@ -149,7 +149,7 @@ def run_PPO(env_name="CarRacing-v3", episodes=1000):
     mini_batch_size = 64
     update_epochs = 10
 
-    batch = {'obs': [], 'actions':[], 'rewards':[], 'values':[], 'dones':[], 'log_probs':[]}
+    batch = {'obs': [], 'actions': [], 'rewards': [], 'values': [], 'dones': [], 'log_probs': []}
     steps_collected = 0
     obs, _ = env.reset()
     obs = preprocess(obs)
@@ -158,13 +158,19 @@ def run_PPO(env_name="CarRacing-v3", episodes=1000):
         episode_reward = 0
         done = False
         while not done:
+            # Get discrete action index from policy
             action_idx, log_prob, value = policy.act(obs)
-            next_obs, reward, terminated, truncated, _ = env.step(action_idx)
+            
+            # Map index to actual environment action
+            action_np = DISCRETE_ACTIONS[action_idx]
+            next_obs, reward, terminated, truncated, _ = env.step(action_np)
+            
             next_obs = preprocess(next_obs)
             done = terminated or truncated
 
+            # Store experience
             batch['obs'].append(obs)
-            batch['actions'].append(action_idx)
+            batch['actions'].append(action_idx)  # still store index
             batch['rewards'].append(reward)
             batch['values'].append(value.cpu().item())
             batch['dones'].append(done)
@@ -181,6 +187,7 @@ def run_PPO(env_name="CarRacing-v3", episodes=1000):
                 episode_reward = 0
                 break
 
+        # Update PPO if enough steps collected
         if steps_collected >= batch_size:
             returns = agent.compute_returns(batch['rewards'], batch['values'], batch['dones'])
             batch['returns'] = returns
