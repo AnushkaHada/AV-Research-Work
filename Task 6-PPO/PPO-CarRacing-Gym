@@ -30,6 +30,7 @@ class ActorCritic(nn.Module):
             nn.Linear(np.prod(obs_shape), 256),
             nn.ReLU(),
         )
+        # This is the mean of each action
         self.actor_mean = nn.Sequential(
             nn.Linear(256, 256),
             nn.ReLU(),

@@ -186,10 +186,8 @@ for episode in range(NUM_EPISODES):
         
         state = next_state
         episode_reward += reward  # add the rewards together. 
-        if reward < 0:
-            neg_reward_count += 1
-
-        if neg_reward_count < -50:
+        
+        if neg_reward_count > 50:
             print("Too many negative rewards, terminating early")
             break
 
