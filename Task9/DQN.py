@@ -23,7 +23,12 @@ class DQNLogger:
         self.reward_file = os.path.join(logdir, "episode_rewards.csv")
         self.loss_file = os.path.join(logdir, "losses.csv")
         self.q_stats_file = os.path.join(logdir, "q_stats.csv")
-
+        
+        # --- RESET LOG FILES ON EACH RUN ---
+        for f in [self.reward_file, self.loss_file, self.q_stats_file]:
+            if os.path.exists(f):
+                os.remove(f)
+                
         # Create with headers if needed
         if not os.path.exists(self.reward_file):
             with open(self.reward_file, "w", newline="") as f:
