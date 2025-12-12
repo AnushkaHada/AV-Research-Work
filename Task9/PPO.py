@@ -220,7 +220,7 @@ class PPOAgent:
 # ============================================================
 # PPO Training Loop
 # ============================================================
-def run_PPO(env_name="CarRacing-v3", episodes=1000):
+def run_PPO(env_name="CarRacing-v3", episodes=600):
     env = gym.make(env_name, continuous=True)
     logger = PPOLogger("logs_ppo_carracing")
     update_idx = 0

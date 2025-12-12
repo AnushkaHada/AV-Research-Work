@@ -146,7 +146,7 @@ class ReplayBuffer:
 # ============================================================
 # DQN Training Function (with LOGGING)
 # ============================================================
-def train_dqn(
+def run_DQN(
         episodes=400,
         batch_size=32,
         gamma=0.99,
@@ -256,4 +256,4 @@ def train_dqn(
 # Allow this to run standalone
 # ============================================================
 if __name__ == "__main__":
-    train_dqn()
+    run_DQN()

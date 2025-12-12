@@ -1,9 +1,9 @@
-from dqn_carracing import train_dqn
-from ppo_carracing import train_ppo   # your existing PPO file
+from dqn_carracing import run_DQN
+from ppo_carracing import run_PPO   # your existing PPO file
 
 if __name__ == "__main__":
     print("Running PPO...")
-    train_ppo()
+    run_PPO()
 
     print("Running DQN...")
-    train_dqn()
+    run_DQN()
