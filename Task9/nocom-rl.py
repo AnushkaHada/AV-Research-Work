@@ -1,21 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 import numpy as np
 import gymnasium as gym
-import torch.optim as optim
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
-
-# --- Discrete actions for CarRacing-v3 ---
-DISCRETE_ACTIONS = [
-    np.array([0, 0, 0], dtype=np.float32),   # no-op
-    np.array([-1, 0, 0], dtype=np.float32),  # left
-    np.array([1, 0, 0], dtype=np.float32),   # right
-    np.array([0, 1, 0], dtype=np.float32),   # gas
-    np.array([0, 0, 0.8], dtype=np.float32)  # brake
-]
 
 # --- Preprocessing ---
 def preprocess(obs):
@@ -112,37 +103,35 @@ class PPOAgent:
 
 # --- Training Loop ---
 def run_PPO(env_name="CarRacing-v3", episodes=500):
-    env = gym.make(env_name, continuous=False)  # DISCRETE mode
+    env = gym.make(env_name, continuous=False)  # DISCRETE
     obs, _ = env.reset()
     obs = preprocess(obs)
     shape = obs.shape
-    action_dim = env.action_space.n   # = 5
+    action_dim = env.action_space.n
 
     policy = ActorCritic(shape, action_dim).to(device)
-    optim = torch.optim.Adam(policy.parameters(), lr=3e-4)
+    optim = optim.Adam(policy.parameters(), lr=3e-4)
     agent = PPOAgent(policy, optim)
 
     BATCH = 2048
     batch = {k: [] for k in ["obs", "actions", "rewards", "values", "dones", "logp"]}
-
     steps = 0
     ep_reward = 0
 
-    # --- Training Loop ---
     for ep in range(episodes):
         done = False
         first_step = True
 
         while not done:
-            a, lp, v = policy.act(obs)  # a is already an int index from 0..4
+            a, lp, v = policy.act(obs)
 
-            # --- DEBUG: only for first step ---
+            # DEBUG: first action of episode
             if first_step:
                 print(f"[DEBUG] Episode {ep} first action idx: {a}")
                 first_step = False
 
-            # Directly pass integer for discrete action space
-            next_obs, r, term, trunc, _ = env.step(a)
+            # --- Pass as 1D np.array for discrete CarRacing-v3 ---
+            next_obs, r, term, trunc, _ = env.step(np.array([a], dtype=np.int64))
             done = term or trunc
             next_obs = preprocess(next_obs)
 
@@ -163,18 +152,12 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
                 obs, _ = env.reset()
                 obs = preprocess(obs)
 
-
-        # PPO update
         if steps >= BATCH:
             with torch.no_grad():
                 last_val = policy.act(obs)[2]
-
-            returns = agent.compute_returns(batch["rewards"], batch["dones"], last_val)
-            batch["returns"] = returns
-
+            batch["returns"] = agent.compute_returns(batch["rewards"], batch["dones"], last_val)
             agent.update(batch, epochs=10, minibatch=64)
-
-            batch = {k: [] for k in ["obs", "actions", "rewards", "values", "dones", "logp"]}
+            batch = {k: [] for k in batch}
             steps = 0
 
 if __name__ == "__main__":
