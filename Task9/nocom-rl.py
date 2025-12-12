@@ -1,20 +1,20 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 import numpy as np
 import gymnasium as gym
+import torch.optim as optim
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
-# --- Discrete to continuous action mapping ---
+# --- Discrete actions for CarRacing-v3 ---
 DISCRETE_ACTIONS = [
-    np.array([0.0, 0.0, 0.0], dtype=np.float32),  # no-op
-    np.array([-1.0, 0.0, 0.0], dtype=np.float32), # left
-    np.array([1.0, 0.0, 0.0], dtype=np.float32),  # right
-    np.array([0.0, 1.0, 0.0], dtype=np.float32),  # gas
-    np.array([0.0, 0.0, 0.8], dtype=np.float32),  # brake
+    np.array([0, 0, 0], dtype=np.float32),   # no-op
+    np.array([-1, 0, 0], dtype=np.float32),  # left
+    np.array([1, 0, 0], dtype=np.float32),   # right
+    np.array([0, 1, 0], dtype=np.float32),   # gas
+    np.array([0, 0, 0.8], dtype=np.float32)  # brake
 ]
 
 # --- Preprocessing ---
@@ -110,15 +110,13 @@ class PPOAgent:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
                 self.optim.step()
 
-        print(f"[DEBUG] PPO Update done. Batch size: {N}, Epochs: {epochs}")
-
 # --- Training Loop ---
 def run_PPO(env_name="CarRacing-v3", episodes=500):
-    env = gym.make(env_name, render_mode=None)
+    env = gym.make(env_name, continuous=False)  # DISCRETE mode
     obs, _ = env.reset()
     obs = preprocess(obs)
     shape = obs.shape
-    action_dim = len(DISCRETE_ACTIONS)
+    action_dim = env.action_space.n   # = 5
 
     policy = ActorCritic(shape, action_dim).to(device)
     optim = torch.optim.Adam(policy.parameters(), lr=3e-4)
@@ -126,16 +124,22 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
 
     BATCH = 2048
     batch = {k: [] for k in ["obs", "actions", "rewards", "values", "dones", "logp"]}
+
     steps = 0
     ep_reward = 0
 
     for ep in range(episodes):
-        print(f"\n[DEBUG] Starting Episode {ep}")
         done = False
+        first_step = True
+
         while not done:
             a, lp, v = policy.act(obs)
             a_np = DISCRETE_ACTIONS[a]
-            print(f"[DEBUG] Action idx: {a}, Mapped action: {a_np}")
+
+            # Minimal debug: only first action of episode
+            if first_step:
+                print(f"[DEBUG] Episode {ep} first action idx: {a}, Mapped action: {a_np}")
+                first_step = False
 
             next_obs, r, term, trunc, _ = env.step(a_np)
             done = term or trunc
@@ -158,6 +162,7 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
                 obs, _ = env.reset()
                 obs = preprocess(obs)
 
+        # PPO update
         if steps >= BATCH:
             with torch.no_grad():
                 last_val = policy.act(obs)[2]
@@ -166,7 +171,6 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
             batch["returns"] = returns
 
             agent.update(batch, epochs=10, minibatch=64)
-            print(f"[DEBUG] Batch update completed at step {steps}")
 
             batch = {k: [] for k in ["obs", "actions", "rewards", "values", "dones", "logp"]}
             steps = 0
