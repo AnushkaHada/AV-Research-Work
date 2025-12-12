@@ -44,12 +44,13 @@ class ActorCritic(nn.Module):
 
 # --- PPO Agent ---
 class PPOAgent:
-    def __init__(self, policy, optim, gamma=0.99, lam=0.95, eps=0.2):
+    def __init__(self, policy, optimizer, gamma=0.99, lam=0.95, eps=0.2):
         self.policy = policy
-        self.optim = optim
+        self.optim = optimizer
         self.gamma = gamma
         self.lam = lam
         self.eps = eps
+
 
     def compute_returns(self, rewards, dones, last_val):
         R = last_val
@@ -110,8 +111,9 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
     action_dim = env.action_space.n
 
     policy = ActorCritic(shape, action_dim).to(device)
-    optim = optim.Adam(policy.parameters(), lr=3e-4)
-    agent = PPOAgent(policy, optim)
+    optimizer = optim.Adam(policy.parameters(), lr=3e-4)  # renamed from 'optim'
+    agent = PPOAgent(policy, optimizer)
+
 
     BATCH = 2048
     batch = {k: [] for k in ["obs", "actions", "rewards", "values", "dones", "logp"]}
