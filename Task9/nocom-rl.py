@@ -4,7 +4,6 @@ import numpy as np
 import gymnasium as gym
 import torch.nn.functional as F
 
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
@@ -13,7 +12,6 @@ def preprocess(obs):
     obs = obs.transpose(2, 0, 1)  # HWC -> CHW
     obs = torch.tensor(obs, dtype=torch.float32) / 255.0
     return obs
-
 
 # --- Actor-Critic ---
 class ActorCritic(nn.Module):
@@ -41,12 +39,7 @@ class ActorCritic(nn.Module):
         logits, value = self.forward(obs)
         dist = torch.distributions.Categorical(logits=logits)
         action = dist.sample()
-        return (
-            action.item(),
-            dist.log_prob(action).item(),
-            value.item()
-        )
-
+        return action.item(), dist.log_prob(action).item(), value.item()
 
 # --- PPO Agent ---
 class PPOAgent:
@@ -107,14 +100,13 @@ class PPOAgent:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
                 self.optim.step()
 
-
 # --- Training Loop ---
 def run_PPO(env_name="CarRacing-v3", episodes=500):
-    env = gym.make(env_name, continuous=False)  # DISCRETE MODE
+    env = gym.make(env_name, continuous=False)  # Discrete mode
     obs, _ = env.reset()
     obs = preprocess(obs)
     shape = obs.shape
-    action_dim = env.action_space.n   # = 5
+    action_dim = env.action_space.n
 
     policy = ActorCritic(shape, action_dim).to(device)
     optim = torch.optim.Adam(policy.parameters(), lr=3e-4)
@@ -128,15 +120,11 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
 
     for ep in range(episodes):
         done = False
-
         while not done:
             a, lp, v = policy.act(obs)
 
-            # --- FIX: Force int, convert to numpy int64 ---
-            a = int(a)
-            a_np = np.array(a, dtype=np.int64)
-
-            next_obs, r, term, trunc, _ = env.step(a_np)
+            # --- FIX: Pass Python int directly ---
+            next_obs, r, term, trunc, _ = env.step(a)
             done = term or trunc
 
             next_obs = preprocess(next_obs)
@@ -169,7 +157,6 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
 
             batch = {k: [] for k in ["obs", "actions", "rewards", "values", "dones", "logp"]}
             steps = 0
-
 
 if __name__ == "__main__":
     run_PPO()
