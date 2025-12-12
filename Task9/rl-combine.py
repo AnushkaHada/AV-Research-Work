@@ -197,12 +197,14 @@ class PPOAgent():
         
 def run_PPO(env_name = "CarRacing-v3", episodes = 1000):
     env = gym.make(env_name, continuous=True)
-    obs_shape = env.observation_space.shape # get shape of observations.
-    action_dim = env.action_space.shape[0] # get the shape of the action space. 
-    
-    # Get the policy from the actor critic class
+    # Fix: get CHW shape after preprocessing
+    sample_obs, _ = env.reset()
+    sample_obs = preprocess_PPO(sample_obs)  # (3, 96, 96)
+    obs_shape = sample_obs.shape
+
+    action_dim = env.action_space.shape[0]
+
     policy = ActorCritic(obs_shape, action_dim).to(device)
-    # Uses a basic optimizer.
     optimizer = optim.Adam(policy.parameters(), lr=3e-4)
     agent = PPOAgent(env, policy, optimizer)
     
