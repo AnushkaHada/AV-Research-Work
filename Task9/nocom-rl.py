@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 import numpy as np
 import gymnasium as gym
-import torch.nn.functional as F
+from gymnasium.wrappers import DiscreteActionWrapper
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
@@ -102,11 +104,14 @@ class PPOAgent:
 
 # --- Training Loop ---
 def run_PPO(env_name="CarRacing-v3", episodes=500):
-    env = gym.make(env_name, continuous=False)  # Discrete mode
+    # --- Use DiscreteActionWrapper for proper discrete actions ---
+    env = gym.make(env_name, render_mode=None)  # default continuous Box(3)
+    env = DiscreteActionWrapper(env)  # now env.action_space = Discrete(5)
+
     obs, _ = env.reset()
     obs = preprocess(obs)
     shape = obs.shape
-    action_dim = env.action_space.n
+    action_dim = env.action_space.n  # 5 discrete actions
 
     policy = ActorCritic(shape, action_dim).to(device)
     optim = torch.optim.Adam(policy.parameters(), lr=3e-4)
@@ -122,8 +127,7 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
         done = False
         while not done:
             a, lp, v = policy.act(obs)
-
-            # --- FIX: Pass Python int directly ---
+            # --- Pass Python int directly to step ---
             next_obs, r, term, trunc, _ = env.step(a)
             done = term or trunc
 
