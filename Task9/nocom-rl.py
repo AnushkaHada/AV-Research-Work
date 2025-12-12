@@ -4,10 +4,25 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import gymnasium as gym
-from gymnasium.spaces import Discrete # Import to use for checking
 
+# Import to use for checking (optional, but good practice)
+from gymnasium.spaces import Discrete, Box 
+
+# --- Configuration ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
+
+# Define the 5 discrete actions as continuous [steer, gas, brake] arrays
+# These actions will be used to convert the integer output of the policy 
+# into the float array required by the continuous CarRacing environment.
+DISCRETE_ACTIONS = {
+    0: np.array([0.0, 0.0, 0.0], dtype=np.float32),  # Do Nothing
+    1: np.array([-1.0, 0.0, 0.0], dtype=np.float32), # Steer Left
+    2: np.array([1.0, 0.0, 0.0], dtype=np.float32),  # Steer Right
+    3: np.array([0.0, 1.0, 0.0], dtype=np.float32),  # Gas
+    4: np.array([0.0, 0.0, 0.8], dtype=np.float32)   # Brake
+}
+ACTION_DIM = 5 # Number of discrete choices your policy will make
 
 # --- Preprocessing ---
 def preprocess(obs):
@@ -23,7 +38,6 @@ class ActorCritic(nn.Module):
         super().__init__()
         C, H, W = obs_shape
         self.cnn = nn.Sequential(
-            # Standard CNN architecture for visual RL (e.g., Atari, CarRacing)
             nn.Conv2d(C, 32, 8, 4), nn.ReLU(),
             nn.Conv2d(32, 64, 4, 2), nn.ReLU(),
             nn.Conv2d(64, 64, 3, 1), nn.ReLU()
@@ -52,7 +66,7 @@ class ActorCritic(nn.Module):
         dist = torch.distributions.Categorical(logits=logits)
         action = dist.sample()
         
-        # Returns the action as an integer (0, 1, 2, 3, or 4 for CarRacing-v3 discrete)
+        # Returns the action as an integer (0, 1, 2, 3, or 4)
         return int(action.item()), dist.log_prob(action).item(), value.item()
 
 # --- PPO Agent ---
@@ -65,9 +79,7 @@ class PPOAgent:
         self.eps_clip = eps_clip
 
     def compute_returns(self, rewards, dones, last_val):
-        # Generalized Advantage Estimation (GAE) is implicitly calculated here 
-        # by using the discounted returns R, which will be used to calculate Advantage 
-        # (A = R - V) during the update.
+        # Calculates discounted returns
         R = last_val
         returns = []
         for r, d in zip(reversed(rewards), reversed(dones)):
@@ -109,9 +121,9 @@ class PPOAgent:
                 surr1 = ratio * mb_adv
                 surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * mb_adv
 
-                loss_actor = -torch.min(surr1, surr2).mean() # Maximize this
-                loss_critic = F.mse_loss(mb_ret, val) # Minimize this
-                loss_entropy = dist.entropy().mean() # Maximize this
+                loss_actor = -torch.min(surr1, surr2).mean() 
+                loss_critic = F.mse_loss(mb_ret, val) 
+                loss_entropy = dist.entropy().mean() 
 
                 # Combined Loss
                 loss = loss_actor + 0.5 * loss_critic - 0.01 * loss_entropy
@@ -125,27 +137,28 @@ class PPOAgent:
 # --- Training Loop ---
 def run_PPO(env_name="CarRacing-v3", episodes=500):
     
-    # *** THE FIX FOR 'int' object has no attribute 'astype' ***
-    # This forces the environment to use the discrete action space 
-    # compatible with the ActorCritic's integer output.
-    env = gym.make(env_name, continuous=False) 
+    # *** THE NEW FIX: Initialize in continuous mode and map manually ***
+    # This ensures the environment step function receives a NumPy array.
+    env = gym.make(env_name) 
     
-    # Diagnostic Check (Should print: Discrete(5))
+    # Diagnostic Check (Should print: Box(3,))
     print(f"Environment Action Space (Check): {env.action_space}")
-    if not isinstance(env.action_space, Discrete):
-        print("\nFATAL ERROR: Environment is still in continuous mode. The fix was not applied or saved correctly.\n")
-        return # Stop execution if the environment setup failed
+    if not isinstance(env.action_space, Box):
+        print("\nFATAL ERROR: Environment is not in expected continuous mode. Check your gym installation.\n")
+        return
 
     obs, _ = env.reset()
     obs = preprocess(obs)
     shape = obs.shape
-    action_dim = env.action_space.n # Will be 5 (Do Nothing, Left, Right, Gas, Brake)
+    
+    # Use the globally defined discrete action count
+    action_dim = ACTION_DIM 
 
     policy = ActorCritic(shape, action_dim).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=3e-4)
     agent = PPOAgent(policy, optimizer)
 
-    BATCH = 2048 # Number of total steps to collect before a PPO update
+    BATCH = 2048 
     batch = {k: [] for k in ["obs", "actions", "rewards", "values", "dones", "logp"]}
     steps = 0
     ep_reward = 0
@@ -153,18 +166,21 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
     for ep in range(episodes):
         done = False
         while not done:
-            # a will be an integer action index (0-4)
-            a, lp, v = policy.act(obs) 
-            # print(f"[DEBUG] Episode {ep} action idx: {a}") # Keep for monitoring
+            # a_idx is the integer (0-4) from your policy
+            a_idx, lp, v = policy.act(obs) 
+            print(f"[DEBUG] Episode {ep} action idx: {a_idx}") 
 
-            # The environment now correctly handles the integer action 'a' 
-            # because we set continuous=False during env creation.
-            next_obs, r, term, trunc, _ = env.step(a) 
+            # **MANUAL MAPPING**
+            # Convert the discrete action index to the continuous NumPy array
+            a_continuous = DISCRETE_ACTIONS[a_idx]
+            
+            # Pass the NumPy array (a_continuous) to env.step()
+            next_obs, r, term, trunc, _ = env.step(a_continuous) 
             done = term or trunc
             next_obs = preprocess(next_obs)
 
             batch["obs"].append(obs)
-            batch["actions"].append(a)
+            batch["actions"].append(a_idx) # Store the integer index
             batch["rewards"].append(r)
             batch["values"].append(v)
             batch["dones"].append(done)
@@ -182,7 +198,6 @@ def run_PPO(env_name="CarRacing-v3", episodes=500):
 
         if steps >= BATCH:
             with torch.no_grad():
-                # Get the value estimate for the last state (needed for GAE)
                 last_val = policy.act(obs)[2] 
 
             returns = agent.compute_returns(batch["rewards"], batch["dones"], last_val)
