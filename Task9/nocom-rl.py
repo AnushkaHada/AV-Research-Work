@@ -3,18 +3,12 @@ import torch.nn as nn
 import numpy as np
 import gymnasium as gym
 import torch.optim as optim
-import random
-from collections import deque
-import cv2
-import os
-import csv
 import torch.nn.functional as F
-
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
-# --- Discrete action mapping ---
+# --- Discrete action mapping (still continuous env expects arrays) ---
 DISCRETE_ACTIONS = [
     np.array([0, 0, 0], dtype=np.float32),   # no-op
     np.array([-1, 0, 0], dtype=np.float32),  # left
@@ -25,9 +19,11 @@ DISCRETE_ACTIONS = [
 
 # --- Preprocessing ---
 def preprocess(obs):
+    # obs: HWC uint8 -> convert to CHW float32 in [0,1]
+    obs = np.asarray(obs)
     obs = obs.transpose(2, 0, 1)  # HWC -> CHW
     obs = torch.tensor(obs, dtype=torch.float32) / 255.0
-    return obs
+    return obs  # CPU tensor (C, H, W)
 
 # --- Actor-Critic ---
 class ActorCritic(nn.Module):
@@ -35,12 +31,13 @@ class ActorCritic(nn.Module):
         super().__init__()
         C, H, W = obs_shape
         self.cnn = nn.Sequential(
-            nn.Conv2d(C, 32, 8, 4), nn.ReLU(),
-            nn.Conv2d(32, 64, 4, 2), nn.ReLU(),
-            nn.Conv2d(64, 64, 3, 1), nn.ReLU()
+            nn.Conv2d(C, 32, kernel_size=8, stride=4), nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2), nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1), nn.ReLU()
         )
         with torch.no_grad():
-            flat_size = self.cnn(torch.zeros(1, C, H, W)).view(1, -1).size(1)
+            dummy = torch.zeros(1, C, H, W)
+            flat_size = self.cnn(dummy).view(1, -1).size(1)
         self.fc = nn.Sequential(
             nn.Linear(flat_size, 512), nn.ReLU()
         )
@@ -48,19 +45,21 @@ class ActorCritic(nn.Module):
         self.critic = nn.Linear(512, 1)
 
     def forward(self, obs):
+        # obs: (batch, C, H, W)
         x = self.cnn(obs).view(obs.size(0), -1)
         x = self.fc(x)
         logits = self.actor_logits(x)
-        value = self.critic(x)
+        value = self.critic(x).squeeze(-1)  # (batch,)
         return logits, value
 
     def act(self, obs):
-        obs = obs.unsqueeze(0).to(device)
-        logits, value = self.forward(obs)
+        # obs: (C, H, W) tensor on CPU
+        obs = obs.unsqueeze(0).to(device)  # (1, C, H, W)
+        logits, value = self.forward(obs)  # logits: (1, A), value: (1,)
         dist = torch.distributions.Categorical(logits=logits)
-        action_idx = dist.sample()
-        log_prob = dist.log_prob(action_idx)
-        return action_idx.item(), log_prob.squeeze(0), value.squeeze(0)
+        action_idx = dist.sample().item()
+        log_prob = dist.log_prob(torch.tensor(action_idx, device=device)).item()
+        return action_idx, log_prob, value.squeeze(0).item()
 
 # --- PPO Agent ---
 class PPOAgent():
@@ -71,19 +70,18 @@ class PPOAgent():
         self.lam = lam
         self.eps_clip = eps_clip
 
-    def compute_returns(self, rewards, values, dones):
+    def compute_returns(self, rewards, dones, last_value=0.0):
+        # Simple discounted returns with bootstrap from last_value
         returns = []
-        gae = 0
-        next_value = 0
-        for step in reversed(range(len(rewards))):
-            delta = rewards[step] + self.gamma * next_value * (1 - dones[step]) - values[step]
-            gae = delta + self.gamma * self.lam * (1 - dones[step]) * gae
-            next_value = values[step]
-            returns.insert(0, gae + values[step])
+        R = last_value
+        for r, d in zip(reversed(rewards), reversed(dones)):
+            R = r + self.gamma * R * (0.0 if d else 1.0)
+            returns.insert(0, R)
         return returns
 
     def update(self, batch, epochs=4, batch_size=64):
-        obs_tensor = torch.stack(batch['obs']).to(device)
+        # Convert to tensors
+        obs_tensor = torch.stack(batch['obs']).to(device)  # (N, C, H, W)
         actions_tensor = torch.tensor(batch['actions'], dtype=torch.long, device=device)
         returns_tensor = torch.tensor(batch['returns'], dtype=torch.float32, device=device)
         old_log_probs_tensor = torch.tensor(batch['log_probs'], dtype=torch.float32, device=device)
@@ -92,16 +90,14 @@ class PPOAgent():
         advantage = returns_tensor - values_tensor
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
 
-        dataset_size = len(batch['obs'])
-        losses = {'actor': 0, 'critic': 0, 'total':0}
+        dataset_size = obs_tensor.size(0)
+        losses = {'actor': 0.0, 'critic': 0.0, 'total': 0.0}
         count = 0
 
         for _ in range(epochs):
-            indices = np.arange(dataset_size)
-            np.random.shuffle(indices)
+            perm = np.random.permutation(dataset_size)
             for start in range(0, dataset_size, batch_size):
-                end = start + batch_size
-                idx = indices[start:end]
+                idx = perm[start:start+batch_size]
                 mb_obs = obs_tensor[idx]
                 mb_actions = actions_tensor[idx]
                 mb_adv = advantage[idx]
@@ -109,7 +105,7 @@ class PPOAgent():
                 mb_old_log_probs = old_log_probs_tensor[idx]
 
                 logits_pred, value_pred = self.policy(mb_obs)
-                value_pred = value_pred.squeeze()
+                # value_pred: (batch,)
                 dist = torch.distributions.Categorical(logits=logits_pred)
                 log_probs = dist.log_prob(mb_actions)
 
@@ -122,6 +118,7 @@ class PPOAgent():
 
                 self.optimizer.zero_grad()
                 loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
                 self.optimizer.step()
 
                 losses['actor'] += loss_actor.item()
@@ -129,16 +126,18 @@ class PPOAgent():
                 losses['total'] += loss.item()
                 count += 1
 
-        for key in losses:
-            losses[key] /= count
+        # average
+        for k in losses:
+            losses[k] /= max(1, count)
         return losses
 
 # --- Training Loop ---
 def run_PPO(env_name="CarRacing-v3", episodes=1000):
-    env = gym.make(env_name, continuous=False)  # Discrete action space
+    # Note: CarRacing has a `continuous` flag; set to False because we map discrete actions
+    env = gym.make(env_name, continuous=False)
     sample_obs, _ = env.reset()
     sample_obs = preprocess(sample_obs)
-    obs_shape = sample_obs.shape
+    obs_shape = sample_obs.shape  # (C, H, W)
     action_dim = len(DISCRETE_ACTIONS)
 
     policy = ActorCritic(obs_shape, action_dim).to(device)
@@ -149,51 +148,60 @@ def run_PPO(env_name="CarRacing-v3", episodes=1000):
     mini_batch_size = 64
     update_epochs = 10
 
+    # canonical batch keys
     batch = {'obs': [], 'actions': [], 'rewards': [], 'values': [], 'dones': [], 'log_probs': []}
     steps_collected = 0
+
     obs, _ = env.reset()
     obs = preprocess(obs)
 
     for episode in range(episodes):
-        episode_reward = 0
+        episode_reward = 0.0
         done = False
         while not done:
             # Get discrete action index from policy
             action_idx, log_prob, value = policy.act(obs)
-            
-            # Map index to actual environment action
+
             action_np = DISCRETE_ACTIONS[action_idx]
             next_obs, reward, terminated, truncated, _ = env.step(action_np)
-            
-            next_obs = preprocess(next_obs)
             done = terminated or truncated
 
+            next_obs = preprocess(next_obs)
+
             # Store experience
-            batch['obs'].append(obs)
-            batch['actions'].append(action_idx)  # still store index
-            batch['rewards'].append(reward)
-            batch['values'].append(value.cpu().item())
-            batch['dones'].append(done)
-            batch['log_probs'].append(log_prob.item())
+            batch['obs'].append(obs)                 # (C,H,W) CPU tensor
+            batch['actions'].append(action_idx)      # int
+            batch['rewards'].append(float(reward))   # float
+            batch['values'].append(float(value))     # float (estimated by policy at action time)
+            batch['dones'].append(bool(done))
+            batch['log_probs'].append(float(log_prob))
 
             episode_reward += reward
             steps_collected += 1
             obs = next_obs
-            
+
             if done:
                 obs, _ = env.reset()
                 obs = preprocess(obs)
-                print(f"Episode {episode} reward: {episode_reward:.2f}")
-                episode_reward = 0
+                print(f"[Episode {episode}] reward: {episode_reward:.2f}  steps_collected: {steps_collected}")
+                episode_reward = 0.0
                 break
 
         # Update PPO if enough steps collected
         if steps_collected >= batch_size:
-            returns = agent.compute_returns(batch['rewards'], batch['values'], batch['dones'])
+            # If not done at buffer end, bootstrap last value from current policy
+            with torch.no_grad():
+                last_obs = batch['obs'][-1].unsqueeze(0).to(device)
+                _, last_value = policy(last_obs)
+                last_value = float(last_value.squeeze(0).item())
+            returns = agent.compute_returns(batch['rewards'], batch['dones'], last_value)
             batch['returns'] = returns
-            agent.update(batch, epochs=update_epochs, batch_size=mini_batch_size)
-            batch = {k: [] for k in batch}
+            losses = agent.update(batch, epochs=update_epochs, batch_size=mini_batch_size)
+            print(f"--- PPO update: actor_loss {losses['actor']:.4f} critic_loss {losses['critic']:.4f} total {losses['total']:.4f}")
+            # clear batch
+            batch = {k: [] for k in ['obs','actions','rewards','values','dones','log_probs']}
             steps_collected = 0
+
 
 # ====================DQN===============================================================
 
@@ -406,5 +414,4 @@ def run_DQN(env_name="CarRacing-v3", episodes=1000):
 
 
 if __name__ == "__main__":
-    run_PPO(episodes=10)  # or run_PPO(...) if you want to test PPO
-    #run_DQN(episodes=10)
+    run_PPO(env_name="CarRacing-v3", episodes=1000)
