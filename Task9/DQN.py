@@ -1,3 +1,15 @@
+'''
+*Disclaimer: ChatGPT was used to debug code. Especially data type and dimension issues. 
+DQN - Learns which action to take in each state by using neural network to find Q-values.
+Q values - How good an action a is to take in state s. 
+The input is the frames and the output is the Q-values for each discrete action. 
+The action choosen is just argmax(Q-value)
+
+DQN improves Q-learning by using a CNN to estimate Q-values. 
+It has a replay buffer to stor past experiences to stablize training. 
+Uses Nature CNN. 
+'''
+
 import os
 import csv
 import random
@@ -9,13 +21,12 @@ import gymnasium as gym
 import cv2
 from collections import deque
 
+# use gpu if avalible. 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using:", device)
 
 
-# ============================================================
-# CSV Logger (DQN Version)
-# ============================================================
+# logs dqn results the same way as PPO.  
 class DQNLogger:
     def __init__(self, logdir="logs_dqn_carracing"):
         os.makedirs(logdir, exist_ok=True)
@@ -24,7 +35,7 @@ class DQNLogger:
         self.loss_file = os.path.join(logdir, "losses.csv")
         self.q_stats_file = os.path.join(logdir, "q_stats.csv")
         
-        # --- RESET LOG FILES ON EACH RUN ---
+        # resets log file each run to prevent bloating. 
         for f in [self.reward_file, self.loss_file, self.q_stats_file]:
             if os.path.exists(f):
                 os.remove(f)
@@ -56,12 +67,11 @@ class DQNLogger:
             csv.writer(f).writerow([update_idx, q.mean(), q.max()])
 
 
-# ============================================================
-# Nature CNN
-# ============================================================
+# Nature CNN, similar structure to PPO nature CNN. 
 class NatureCNN(nn.Module):
     def __init__(self, num_actions):
         super().__init__()
+        # final layer outputs Q-value. 
         self.net = nn.Sequential(
             nn.Conv2d(4, 32, 8, stride=4),
             nn.ReLU(),
@@ -72,24 +82,25 @@ class NatureCNN(nn.Module):
             nn.Flatten(),
             nn.Linear(64 * 7 * 7, 512),
             nn.ReLU(),
-            nn.Linear(512, num_actions)
+            nn.Linear(512, num_actions) # 512 is a common amount of features used for nature CNN
         )
+        
 
     def forward(self, x):
-        return self.net(x / 255.0)
+        return self.net(x / 255.0) # normalizes
 
 
-# ============================================================
+
 # Replay Buffer
-# ============================================================
 class ReplayBuffer:
     def __init__(self, size=100000):
         self.buf = deque(maxlen=size)
 
     def push(self, s, a, r, s2, d):
-        self.buf.append((s, a, r, s2, d))
+        self.buf.append((s, a, r, s2, d)) # stores info in dequeue.
 
     def sample(self, batch_size):
+        # samples random mini batches.  
         batch = random.sample(self.buf, batch_size)
         s, a, r, s2, d = zip(*batch)
         return (np.array(s), np.array(a), np.array(r),
@@ -99,22 +110,18 @@ class ReplayBuffer:
         return len(self.buf)
 
 
-# ============================================================
-# Preprocessing
-# ============================================================
+# Preprocessing converts rbg to gray scale to prevent excess noise. 
 def preprocess_frame(obs):
     obs = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
-    obs = cv2.resize(obs, (84, 84), interpolation=cv2.INTER_AREA)
+    obs = cv2.resize(obs, (84, 84), interpolation=cv2.INTER_AREA) # resizes to 84 by 84 and maintains 4 frame stack
     return obs
 
-
+# This is important since 4 frames provides more info then a single frame. 
 def init_stack(frame):
     return np.stack([frame] * 4, axis=0)
 
 
-# ============================================================
-# Discrete actions for CarRacing
-# ============================================================
+# Discrete actions for CarRacing manually defined. 
 DISCRETE_ACTIONS = [
     np.array([0.0, 1.0, 0.0]),     # Gas
     np.array([0.0, 0.0, 1.0]),     # Brake
@@ -124,32 +131,36 @@ DISCRETE_ACTIONS = [
 ]
 
 
-# ============================================================
-# DQN Training Loop with Logging
-# ============================================================
+
+# DQN Training 
 def run_DQN(episodes=600):
+    # Even continuous=True we manually use discrete action space. 
     env = gym.make("CarRacing-v3", continuous=True, render_mode=None)
 
     logger = DQNLogger()
 
     num_actions = len(DISCRETE_ACTIONS)
+    
+    # creates two copies of same network. 
     q_net = NatureCNN(num_actions).to(device)
     target_net = NatureCNN(num_actions).to(device)
     target_net.load_state_dict(q_net.state_dict())
 
     optimizer = optim.Adam(q_net.parameters(), lr=1e-4)
-    replay = ReplayBuffer(200000)
+    replay = ReplayBuffer(200000) # large buffer for stability. 
 
     gamma = 0.99
     batch_size = 32
     train_start = 20000
-    target_update_freq = 10000
+    target_update_freq = 10000 # updates target network every x steps. 
 
     eps_start, eps_final, eps_decay = 1.0, 0.05, 400000
     global_step = 0
     update_idx = 0
-
+    
+    # loops through episodes. 
     for ep in range(episodes):
+        # sets up clean env and gets info
         obs, _ = env.reset()
         f = preprocess_frame(obs)
         state = init_stack(f)
@@ -174,10 +185,11 @@ def run_DQN(episodes=600):
             action = DISCRETE_ACTIONS[action_idx]
             next_obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
-
+            
+            # updates frame stack. 
             next_f = preprocess_frame(next_obs)
             next_state = np.roll(state, -1, axis=0)
-            next_state[-1] = next_f
+            next_state[-1] = next_f # newest frame. 
 
             replay.push(state, action_idx, reward, next_state, done)
 
@@ -187,24 +199,28 @@ def run_DQN(episodes=600):
             # training
             if len(replay) > train_start:
                 s, a, r, s2, d = replay.sample(batch_size)
-
+                
+                # convert numpy to tensor
                 s = torch.tensor(s, dtype=torch.float32).to(device)
                 a = torch.tensor(a, dtype=torch.long).to(device)
                 r = torch.tensor(r, dtype=torch.float32).to(device)
                 s2 = torch.tensor(s2, dtype=torch.float32).to(device)
                 d = torch.tensor(d, dtype=torch.float32).to(device)
-
+                
+                # pridicted Q. Gather selects the predicted q for an action. 
                 q = q_net(s).gather(1, a.unsqueeze(1)).squeeze(1)
+                # computes target. 
                 next_q = target_net(s2).max(1)[0]
-                target = r + gamma * next_q * (1 - d)
+                target = r + gamma * next_q * (1 - d) # bellman update. 
 
-                loss = nn.MSELoss()(q, target.detach())
-
+                loss = nn.MSELoss()(q, target.detach()) # detaches to avoid backpropogation through target network. 
+                
+                # backpropagate. 
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
-                # --- LOGGING ---
+                # logs results. 
                 logger.log_loss(update_idx, loss.item())
                 logger.log_q_stats(update_idx, q_net(s).detach().cpu())
 
@@ -217,6 +233,5 @@ def run_DQN(episodes=600):
         print(f"Episode {ep} | Reward: {ep_reward:.1f} | Eps: {eps:.3f}")
 
 
-# ============================================================
 if __name__ == "__main__":
     run_DQN()
