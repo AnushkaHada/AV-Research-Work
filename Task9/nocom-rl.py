@@ -1,202 +1,298 @@
-import gymnasium as gym
+import os
+import csv
+import random
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.distributions import Normal
+import gymnasium as gym
 
 # ============================================================
-#  Nature CNN Feature Extractor (as in DQN Nature paper)
+# Device
 # ============================================================
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
 
-class NatureCNN(nn.Module):
-    def __init__(self, input_channels=3, feature_dim=512):
+
+# ============================================================
+# PPO Logger — saves CSV logs (rewards, losses, policy stats)
+# ============================================================
+class PPOLogger:
+    def __init__(self, logdir="logs_ppo_carracing"):
+        os.makedirs(logdir, exist_ok=True)
+
+        self.reward_file = os.path.join(logdir, "episode_rewards.csv")
+        self.loss_file = os.path.join(logdir, "losses.csv")
+        self.policy_file = os.path.join(logdir, "policy_stats.csv")
+
+        # Create files with headers if missing
+        if not os.path.exists(self.reward_file):
+            with open(self.reward_file, "w", newline="") as f:
+                csv.writer(f).writerow(["episode", "reward"])
+
+        if not os.path.exists(self.loss_file):
+            with open(self.loss_file, "w", newline="") as f:
+                csv.writer(f).writerow(["update_idx", "actor_loss", "critic_loss", "entropy", "total_loss"])
+
+        if not os.path.exists(self.policy_file):
+            with open(self.policy_file, "w", newline="") as f:
+                csv.writer(f).writerow(["update_idx", "mean_action", "std_action"])
+
+    def log_reward(self, episode, reward):
+        with open(self.reward_file, "a", newline="") as f:
+            csv.writer(f).writerow([episode, reward])
+
+    def log_losses(self, update_idx, losses, entropy):
+        with open(self.loss_file, "a", newline="") as f:
+            csv.writer(f).writerow([
+                update_idx,
+                losses["actor"],
+                losses["critic"],
+                entropy,
+                losses["total"]
+            ])
+
+    def log_policy_stats(self, update_idx, policy):
+        mean_action = policy.actor_mean.weight.data.mean().item()
+        std_action = policy.log_std.exp().mean().item()
+
+        with open(self.policy_file, "a", newline="") as f:
+            csv.writer(f).writerow([update_idx, mean_action, std_action])
+
+
+# ============================================================
+# Preprocess Observation
+# ============================================================
+def preprocess_PPO(obs):
+    obs = obs.transpose(2, 0, 1)        # HWC → CHW
+    obs = torch.tensor(obs, dtype=torch.float32) / 255.0
+    return obs.to(device)
+
+
+# ============================================================
+# Nature CNN + PPO Actor-Critic
+# ============================================================
+class ActorCritic(nn.Module):
+    def __init__(self, obs_shape, action_dim):
         super().__init__()
+
+        C, H, W = obs_shape
+
+        # Nature CNN
         self.cnn = nn.Sequential(
-            nn.Conv2d(input_channels, 32, 8, stride=4),  # -> 32×(24×24)
+            nn.Conv2d(C, 32, 8, stride=4),  # (96 → 23)
             nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2),              # -> 64×(11×11)
+            nn.Conv2d(32, 64, 4, stride=2), # (23 → 10)
             nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=1),              # -> 64×(9×9)
-            nn.ReLU(),
-            nn.Flatten()
-        )
-
-        # compute CNN output size (lazy)
-        with torch.no_grad():
-            dummy = torch.zeros(1, input_channels, 96, 96)
-            n_flat = self.cnn(dummy).shape[1]
-
-        self.linear = nn.Sequential(
-            nn.Linear(n_flat, feature_dim),
+            nn.Conv2d(64, 64, 3, stride=1), # (10 → 8)
             nn.ReLU()
         )
 
-    def forward(self, x):
-        x = x / 255.0  # pixel normalization
-        return self.linear(self.cnn(x))
+        with torch.no_grad():
+            dummy = torch.zeros(1, C, H, W)
+            flat_size = self.cnn(dummy).view(1, -1).shape[1]
 
+        self.fc = nn.Sequential(
+            nn.Linear(flat_size, 512),
+            nn.ReLU()
+        )
 
-# ============================================================
-#  Actor-Critic using Nature CNN Encoder
-# ============================================================
+        # Gaussian policy
+        self.actor_mean = nn.Linear(512, action_dim)
+        self.log_std = nn.Parameter(torch.zeros(action_dim) * -0.5)
 
-class ActorCritic(nn.Module):
-    def __init__(self, action_dim, feature_dim=512):
-        super().__init__()
-        self.encoder = NatureCNN()
-
-        self.actor_mean = nn.Linear(feature_dim, action_dim)
-        self.actor_logstd = nn.Parameter(torch.zeros(action_dim))
-
-        self.critic = nn.Linear(feature_dim, 1)
+        # Critic
+        self.critic = nn.Linear(512, 1)
 
     def forward(self, obs):
-        features = self.encoder(obs)
-        return features
+        features = self.cnn(obs)
+        features = features.view(features.size(0), -1)
+        features = self.fc(features)
+
+        mean = self.actor_mean(features)
+        std = self.log_std.exp().expand_as(mean)
+        value = self.critic(features)
+
+        return mean, std, value
 
     def act(self, obs):
-        features = self.encoder(obs)
-        mean = self.actor_mean(features)
-        std = torch.exp(self.actor_logstd)
-        dist = Normal(mean, std)
+        # obs: (C,H,W)
+        obs = obs.unsqueeze(0)  # add batch dim
+        mean, std, value = self.forward(obs)
+
+        dist = torch.distributions.Normal(mean, std)
         action = dist.sample()
-        logprob = dist.log_prob(action).sum(-1)
-        return action, logprob, dist
+        log_prob = dist.log_prob(action).sum(dim=1)
 
-    def value(self, obs):
-        features = self.encoder(obs)
-        return self.critic(features)
+        # Clamp CarRacing actions
+        action = action[0]
+        action_clamped = torch.zeros_like(action)
+        action_clamped[0] = torch.tanh(action[0])     # steering (-1 to 1)
+        action_clamped[1] = torch.sigmoid(action[1])  # gas      (0 to 1)
+        action_clamped[2] = torch.sigmoid(action[2])  # brake    (0 to 1)
 
-
-# ============================================================
-#  PPO Implementation
-# ============================================================
-
-def compute_gae(rewards, values, dones, gamma=0.99, lam=0.95):
-    advantages = np.zeros_like(rewards)
-    lastgaelam = 0
-    for t in reversed(range(len(rewards))):
-        next_value = values[t + 1] if t < len(rewards) - 1 else 0
-        delta = rewards[t] + gamma * next_value * (1 - dones[t]) - values[t]
-        advantages[t] = lastgaelam = delta + gamma * lam * (1 - dones[t]) * lastgaelam
-    returns = advantages + values
-    return advantages, returns
+        return action_clamped, log_prob[0], value[0]
 
 
 # ============================================================
-#  Training Loop
+# PPO Agent
 # ============================================================
+class PPOAgent:
+    def __init__(self, policy, optimizer, gamma=0.99, lam=0.95, eps_clip=0.2):
+        self.policy = policy
+        self.optimizer = optimizer
+        self.gamma = gamma
+        self.lam = lam
+        self.eps_clip = eps_clip
 
-def train_ppo(
-    env_id="CarRacing-v3",
-    total_steps=500_000,
-    rollout_steps=2048,
-    batch_size=64,
-    epochs=10,
-    gamma=0.99,
-    lam=0.95,
-    clip_ratio=0.2,
-    lr=3e-4
-):
-    env = gym.make(env_id, continuous=True, render_mode=None)
+    def compute_returns(self, rewards, values, dones):
+        returns = []
+        gae = 0
+        next_value = 0
 
-    obs, _ = env.reset()
-    obs_shape = obs.shape
+        for t in reversed(range(len(rewards))):
+            delta = rewards[t] + self.gamma * next_value * (1 - dones[t]) - values[t]
+            gae = delta + self.gamma * self.lam * (1 - dones[t]) * gae
+            next_value = values[t]
+            returns.insert(0, gae + values[t])
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return returns
 
-    model = ActorCritic(action_dim=3).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    def update(self, batch, epochs=10, batch_size=64):
+        obs = torch.stack(batch["obs"]).to(device)
+        actions = torch.stack(batch["actions"]).to(device)
+        returns = torch.tensor(batch["returns"], dtype=torch.float32, device=device)
+        old_log_probs = torch.tensor(batch["log_probs"], dtype=torch.float32, device=device)
+        values = torch.tensor(batch["values"], dtype=torch.float32, device=device)
 
-    for step in range(0, total_steps, rollout_steps):
-        # ---------- Collect Rollout ----------
-        obses = []
-        actions = []
-        logprobs = []
-        rewards = []
-        dones = []
-        values = []
-
-        for _ in range(rollout_steps):
-            obs_t = torch.tensor(obs, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0).to(device)
-            value = model.value(obs_t).item()
-
-            action, logprob, dist = model.act(obs_t)
-            action_np = action.cpu().numpy()[0]
-
-            next_obs, reward, terminated, truncated, _ = env.step(action_np)
-            done = terminated or truncated
-
-            obses.append(obs)
-            actions.append(action_np)
-            logprobs.append(logprob.item())
-            rewards.append(reward)
-            dones.append(done)
-            values.append(value)
-
-            obs = next_obs
-            if done:
-                obs, _ = env.reset()
-
-        values = np.array(values)
-        advantages, returns = compute_gae(np.array(rewards), values, np.array(dones), gamma, lam)
-
-        # ---------- Convert to tensors ----------
-        obses = torch.tensor(np.array(obses), dtype=torch.float32).permute(0, 3, 1, 2).to(device)
-        actions = torch.tensor(np.array(actions), dtype=torch.float32).to(device)
-        old_logprobs = torch.tensor(logprobs, dtype=torch.float32).to(device)
-        advantages = torch.tensor(advantages, dtype=torch.float32).to(device)
-        returns = torch.tensor(returns, dtype=torch.float32).to(device)
-
+        advantages = returns - values
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # ---------- PPO Update ----------
-        dataset_size = len(obses)
+        total_steps = len(batch["obs"])
+        losses = {"actor": 0, "critic": 0, "total": 0}
+        entropy_last = 0
+        count = 0
+
         for _ in range(epochs):
-            idx = torch.randperm(dataset_size)
-            for start in range(0, dataset_size, batch_size):
-                batch_idx = idx[start:start+batch_size]
+            idxs = np.arange(total_steps)
+            np.random.shuffle(idxs)
 
-                batch_obs = obses[batch_idx]
-                batch_actions = actions[batch_idx]
-                batch_oldlog = old_logprobs[batch_idx]
-                batch_adv = advantages[batch_idx]
-                batch_ret = returns[batch_idx]
+            for start in range(0, total_steps, batch_size):
+                end = start + batch_size
+                mb_idx = idxs[start:end]
 
-                features = model(batch_obs)
-                mean = model.actor_mean(features)
-                std = torch.exp(model.actor_logstd)
-                dist = Normal(mean, std)
+                mb_obs = obs[mb_idx]
+                mb_actions = actions[mb_idx]
+                mb_returns = returns[mb_idx]
+                mb_old_log_probs = old_log_probs[mb_idx]
+                mb_adv = advantages[mb_idx]
 
-                new_logprob = dist.log_prob(batch_actions).sum(-1)
-                ratio = (new_logprob - batch_oldlog).exp()
+                mean, std, value = self.policy(mb_obs)
+                value = value.squeeze()
 
-                # PPO clip loss
-                actor_loss = -torch.min(
-                    ratio * batch_adv,
-                    torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio) * batch_adv
-                ).mean()
+                dist = torch.distributions.Normal(mean, std)
+                new_log_probs = dist.log_prob(mb_actions).sum(dim=1)
+                entropy = dist.entropy().sum(dim=1).mean().item()
+                entropy_last = entropy
 
-                critic_value = model.critic(features).squeeze()
-                critic_loss = ((critic_value - batch_ret) ** 2).mean()
+                ratio = torch.exp(new_log_probs - mb_old_log_probs)
+                clipped = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip)
 
-                entropy = dist.entropy().sum(-1).mean()
+                actor_loss = -torch.min(ratio * mb_adv, clipped * mb_adv).mean()
+                critic_loss = (mb_returns - value).pow(2).mean()
+                loss = actor_loss + 0.5 * critic_loss - 0.01 * dist.entropy().sum(dim=1).mean()
 
-                loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy
-
-                optimizer.zero_grad()
+                self.optimizer.zero_grad()
                 loss.backward()
-                optimizer.step()
+                self.optimizer.step()
 
-        print(f"Step {step}/{total_steps} | Loss={loss.item():.3f}")
+                losses["actor"] += actor_loss.item()
+                losses["critic"] += critic_loss.item()
+                losses["total"] += loss.item()
+                count += 1
 
-    env.close()
+        for k in losses:
+            losses[k] /= count
+
+        return losses, entropy_last
 
 
 # ============================================================
-#  Run Training
+# PPO Training Loop
 # ============================================================
+def run_PPO(env_name="CarRacing-v3", episodes=1000):
+    env = gym.make(env_name, continuous=True)
+    logger = PPOLogger("logs_ppo_carracing")
+    update_idx = 0
 
+    sample_obs, _ = env.reset()
+    sample_obs = preprocess_PPO(sample_obs)
+    obs_shape = sample_obs.shape
+    action_dim = env.action_space.shape[0]
+
+    policy = ActorCritic(obs_shape, action_dim).to(device)
+    optimizer = optim.Adam(policy.parameters(), lr=3e-4)
+    agent = PPOAgent(policy, optimizer)
+
+    batch = {"obs": [], "actions": [], "rewards": [], "values": [], "dones": [], "log_probs": []}
+
+    batch_size = 2048
+    mini_batch = 64
+    update_epochs = 10
+
+    obs, _ = env.reset()
+    obs = preprocess_PPO(obs)
+    steps = 0
+
+    for episode in range(episodes):
+        ep_reward = 0
+
+        while True:
+            action, log_prob, value = policy.act(obs)
+            action_np = action.detach().cpu().numpy().astype(np.float32)
+
+            next_obs, reward, terminated, truncated, _ = env.step(action_np)
+            next_obs = preprocess_PPO(next_obs)
+            done = terminated or truncated
+
+            # Reward shaping
+            reward += action_np[1] * 0.3
+
+            batch["obs"].append(obs)
+            batch["actions"].append(action)
+            batch["rewards"].append(reward)
+            batch["values"].append(value.item())
+            batch["dones"].append(done)
+            batch["log_probs"].append(log_prob.item())
+
+            obs = next_obs
+            ep_reward += reward
+            steps += 1
+
+            if done:
+                logger.log_reward(episode, ep_reward)
+                print(f"Episode {episode} | Reward = {ep_reward:.2f}")
+                obs, _ = env.reset()
+                obs = preprocess_PPO(obs)
+                break
+
+        # Update PPO
+        if steps >= batch_size:
+            returns = agent.compute_returns(batch["rewards"], batch["values"], batch["dones"])
+            batch["returns"] = returns
+
+            losses, entropy = agent.update(batch, epochs=update_epochs, batch_size=mini_batch)
+
+            logger.log_losses(update_idx, losses, entropy)
+            logger.log_policy_stats(update_idx, policy)
+
+            batch = {k: [] for k in batch}  # clear buffer
+            steps = 0
+            update_idx += 1
+
+
+# ============================================================
+# Run PPO
+# ============================================================
 if __name__ == "__main__":
-    train_ppo()
+    run_PPO()
