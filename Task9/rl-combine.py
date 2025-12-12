@@ -194,15 +194,10 @@ class PPOAgent():
             losses[key] /= count
         return losses
                 
-                
-                
+                     
         
-        
-        
-        
-        
-def run_PPO(env_name = "CarRacing-v2", episodes = 1000):
-    env = gym.make("CarRacing-v2", continuous=True)
+def run_PPO(env_name = "CarRacing-v3", episodes = 1000):
+    env = gym.make(env_name, continuous=True)
     obs_shape = env.observation_space.shape # get shape of observations.
     action_dim = env.action_space.shape[0] # get the shape of the action space. 
     
@@ -359,7 +354,7 @@ class FrameStack:
         # Returns np.array shape (k, 84, 84) dtype float32
         return np.stack(self.frames, axis=0)
 
-def run_DQN(env_name="CarRacing-v2", episodes=1000):
+def run_DQN(env_name="CarRacing-v3", episodes=1000):
 
     env = gym.make(env_name, continuous=False, render_mode="rgb_array")
 
