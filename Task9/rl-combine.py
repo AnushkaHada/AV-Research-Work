@@ -208,7 +208,7 @@ def run_PPO(env_name = "CarRacing-v3", episodes = 1000):
     agent = PPOAgent(env, policy, optimizer)
     
     # uses some basic hyperparameters that are common for RL models. 
-    n_episodes = 1000
+    
     batch_size = 2048
     mini_batch_size = 64
     update_epochs = 10 
@@ -223,12 +223,14 @@ def run_PPO(env_name = "CarRacing-v3", episodes = 1000):
     done = False # episode has not ended, thus done is initialized to false. 
     
     # training loop 
-    for episode in range(n_episodes):
+    for episode in range(episodes):
         episode_reward = 0
         
         while True: 
             action, log_prob, value = policy.act(obs)
-            next_obs, reward, terminated, truncated, _ = env.step(action) # Details from env after taking an action
+            action_np = action.detach().cpu().numpy().astype(np.float32)
+            next_obs, reward, terminated, truncated, _ = env.step(action_np)
+            # Details from env after taking an action
             next_obs = preprocess_PPO(next_obs)
             done = terminated or truncated # episode is finished if conditions are met. 
             
@@ -412,7 +414,8 @@ def run_DQN(env_name="CarRacing-v3", episodes=1000):
                 with torch.no_grad():
                     action_idx = q_net(state).argmax().item()
 
-            next_obs, reward, terminated, truncated, _ = env.step(ACTIONS[action_idx])
+            next_obs, reward, terminated, truncated, _ = env.step(np.array(ACTIONS[action_idx], dtype=np.float32))
+
             done = terminated or truncated
 
             # Negative reward counter
@@ -471,5 +474,5 @@ def run_DQN(env_name="CarRacing-v3", episodes=1000):
 
 
 if __name__ == "__main__":
-    run_DQN(episodes=10)  # or run_PPO(...) if you want to test PPO
+    run_PPO(episodes=10)  # or run_PPO(...) if you want to test PPO
     run_DQN(episodes=10)
